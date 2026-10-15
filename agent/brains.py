@@ -1,10 +1,10 @@
 """The agent's "brains": AI models reached through the OpenAI-compatible API.
 
-This one format covers LM Studio (local), Z.ai GLM, Alibaba Qwen, DeepSeek and Gemini, so switching
+This one format covers Gemini, Z.ai GLM, Alibaba Qwen, DeepSeek and OpenRouter, so switching
 is just a settings change. Problems are handled here:
 
-- Local server not running / model missing / context too small -> BrainUnavailable (the router
-  then hands the task to the next brain, e.g. the cloud)
+- Model missing / conversation too long / key refused -> BrainUnavailable (the router then hands
+  the task to the backup AI)
 - Rate limit (429)            -> wait and retry, then BrainUnavailable
 - Server busy / network blip  -> retry with growing pauses
 - Model can't read images     -> drop images and retry
@@ -53,7 +53,6 @@ class Brain:
         self.vision = bool(profile.get("vision", False))
         self.price_input = float(profile.get("price_input", 0))
         self.price_output = float(profile.get("price_output", 0))
-        self.is_local = "localhost" in profile["base_url"] or "127.0.0.1" in profile["base_url"]
         self.usage = usage
         self.budget_ok = budget_ok or (lambda: True)
         self.on_status = on_status or (lambda text: None)
@@ -107,10 +106,6 @@ class Brain:
                 return self._to_reply(response)
 
             except (openai.APIConnectionError, openai.APITimeoutError) as e:
-                if self.is_local:
-                    raise BrainUnavailable(
-                        f"{self.label}: can't reach LM Studio. Open LM Studio, load a model and start the "
-                        "server (Developer tab).") from e
                 attempts["server"] += 1
                 if attempts["server"] > 2:
                     raise BrainUnavailable(f"{self.label}: can't connect. Check your internet.") from e
@@ -148,9 +143,8 @@ class Brain:
                     self.on_notice(f"{self.label} can't read images; continuing without screenshots.")
                     continue
                 if any(w in text for w in ("context", "too long", "n_ctx", "maximum", "exceed")):
-                    hint = (" In LM Studio, reload the model with a bigger Context Length (16384 or more)."
-                            if self.is_local else " Start a new conversation from the tray menu.")
-                    raise BrainUnavailable(f"{self.label}: the conversation is too long for the model.{hint}") from e
+                    raise BrainUnavailable(f"{self.label}: the conversation is too long for the model. "
+                                           "Start a new conversation from the tray menu.") from e
                 raise BrainError(f"{self.label} rejected the request: {_short(e)}") from e
 
             except openai.APIStatusError as e:  # 5xx and other server-side problems

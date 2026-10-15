@@ -12,7 +12,7 @@
     final short answer (shown + spoken)
 
 Brains: your main AI does the work. The backup AI takes over when the main one is unavailable
-(limit used up, no key, server off), or, if the main AI is a local model, when it gets stuck.
+(limit used up, no key, server error).
 """
 
 import getpass
@@ -162,7 +162,6 @@ class Agent:
         chain = self.router.chain()
         index = 0
         brain = chain[0]
-        steps_here, errors_in_a_row = 0, 0
         unavailable = []
 
         for _ in range(self.settings["max_steps_per_command"]):
@@ -174,12 +173,10 @@ class Agent:
                 if index + 1 < len(chain):
                     index += 1
                     brain = chain[index]
-                    steps_here, errors_in_a_row = 0, 0
                     self.ui.show("info", f"{e}\nSwitching to {brain.label}.")
                     continue
                 raise BrainError("\n".join(unavailable)) from e
 
-            steps_here += 1
             turn.append(reply.message)
             if reply.text:
                 self.ui.show("agent", reply.text)
@@ -189,25 +186,16 @@ class Agent:
             images = []
             for call in reply.tool_calls:
                 tools_used.append(call["name"])
-                content, image, ok = self._run_tool(call, can_see=brain.vision)
+                content, image, _ok = self._run_tool(call, can_see=brain.vision)
                 turn.append({"role": "tool", "tool_call_id": call["id"], "content": content})
                 if image:
                     images.append(image)
-                errors_in_a_row = 0 if ok else errors_in_a_row + 1
             if images:
                 turn.append({"role": "user", "content": [
                     {"type": "text", "text": "Screenshot from look_at_screen (numbers match the element list):"},
                     *({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}} for b64 in images),
                 ]})
 
-            # A small local model that keeps failing hands the task to the backup AI.
-            stuck = brain.is_local and (errors_in_a_row >= self.settings["escalate_after_errors"]
-                                        or steps_here >= self.settings["escalate_after_steps"])
-            if stuck and index + 1 < len(chain) and _ready(chain[index + 1]):
-                index += 1
-                brain = chain[index]
-                steps_here, errors_in_a_row = 0, 0
-                self.ui.show("info", f"This is taking a while, so {brain.label} takes over.")
 
         message = "I stopped because this took too many steps. Tell me how to continue."
         self.ui.show("info", message)
@@ -369,11 +357,6 @@ def resolve_action(action: dict) -> list:
         steps.append(("type_text", {"text": args.get("text", ""), "press_enter": args.get("press_enter", False)}))
         return steps
     return [(name, args)]
-
-
-def _ready(brain) -> bool:
-    """Can this brain take over right now (key present, budget left)?"""
-    return not brain.missing_key and (not brain.is_paid or brain.budget_ok())
 
 
 def _to_text(result: dict) -> str:

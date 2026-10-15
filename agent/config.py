@@ -25,15 +25,6 @@ ERROR_LOG_FILE = DATA_DIR / "agent.log"
 # Prices are US dollars per 1 million tokens, used only to track your monthly spending.
 # They are estimates: check the provider's price page and correct them if needed.
 DEFAULT_BRAINS = {
-    "lmstudio": {
-        "label": "Local (LM Studio)",
-        "base_url": "http://localhost:1234/v1",
-        "api_key_env": "",
-        "model": "qwen/qwen3-vl-8b",
-        "vision": True,
-        "price_input": 0, "price_output": 0,
-        "timeout": 300,
-    },
     "glm": {
         "label": "GLM-4.6V (Z.ai)",
         "base_url": "https://api.z.ai/api/paas/v4/",
@@ -99,10 +90,6 @@ DEFAULT_SETTINGS = {
     # server off). "" = no backup.
     "main_brain": "gemini",
     "backup_brain": "",
-    # Only when the main AI is a LOCAL model: hand the task to the backup after this many steps or
-    # this many failed actions in a row (small local models get stuck more often).
-    "escalate_after_steps": 12,
-    "escalate_after_errors": 3,
     # Stop using paid cloud brains when this month's estimated cost reaches this (US dollars).
     "cloud_monthly_budget_usd": 6.0,
     "brains": DEFAULT_BRAINS,
@@ -182,6 +169,11 @@ DEFAULT_SETTINGS = {
 }
 
 
+# Settings and brains from earlier versions that no longer exist (removed when loading).
+REMOVED_SETTINGS = ("brain_mode", "local_brain", "cloud_brain", "escalate_after_steps", "escalate_after_errors")
+REMOVED_BRAINS = ("lmstudio",)  # the local LM Studio model was removed
+
+
 def load_settings() -> dict:
     """Read settings.json, adding any missing options with their default value."""
     settings = json.loads(json.dumps(DEFAULT_SETTINGS))  # deep copy
@@ -191,9 +183,14 @@ def load_settings() -> dict:
         if "model" in raw and "voice_model" not in raw:
             raw["voice_model"] = raw["model"]
         raw.pop("model", None)
-        for old_key in ("brain_mode", "local_brain", "cloud_brain"):  # Stage 2 brain settings
+        for old_key in REMOVED_SETTINGS:
             raw.pop(old_key, None)
         user_brains = raw.pop("brains", {})
+        for name in REMOVED_BRAINS:
+            user_brains.pop(name, None)
+            for key in ("main_brain", "backup_brain"):
+                if raw.get(key) == name:
+                    raw[key] = DEFAULT_SETTINGS[key]
         settings.update(raw)
         for name, profile in user_brains.items():
             settings["brains"][name] = {**settings["brains"].get(name, {}), **profile}

@@ -1,4 +1,4 @@
-"""Tests that run without Windows, a microphone, LM Studio or API keys (the AI is simulated).
+"""Tests that run without Windows, a microphone or API keys (the AI is simulated).
 
 Run:  .venv\\Scripts\\python -m pytest tests
 """
@@ -167,7 +167,6 @@ class FakeBrain:
         self.unavailable = unavailable
         self.missing_key = ""
         self.is_paid = False
-        self.is_local = False
 
     def budget_ok(self):
         return True
@@ -271,18 +270,6 @@ def test_falls_back_to_cloud_when_local_is_off(tmp_path):
     assert any("Switching to cloud" in text for kind, text in ui.lines)
 
 
-def test_escalates_to_cloud_after_repeated_errors(tmp_path):
-    bad = call("read_file", path=str(tmp_path / "missing.txt"))
-    local = FakeBrain([("", [bad]), ("", [bad]), ("", [bad]), ("never used", [])], label="local")
-    local.is_local = True
-    cloud = FakeBrain([("Fixed it.", [])], label="cloud")
-    ui = FakeUI()
-    make_agent(FakeRouter(local, cloud), ui, tmp_path, escalate_after_errors=3).handle("read it")
-    assert len(local.sent) == 3 and len(cloud.sent) == 1
-    assert ui.spoken == ["Fixed it."]
-    assert cloud.sent[0][1]["role"] == "user"  # the cloud brain gets the whole conversation so far
-
-
 def test_reports_all_reasons_when_no_brain_works(tmp_path):
     ui = FakeUI()
     agent = make_agent(FakeRouter(FakeBrain([], "local", unavailable=True), FakeBrain([], "cloud", unavailable=True)),
@@ -361,7 +348,7 @@ def test_stage1_settings_are_migrated():
     assert settings["speech_rate"] == 3
     assert settings["brains"]["glm"]["model"] == "glm-5v"
     assert settings["brains"]["glm"]["base_url"].startswith("https://api.z.ai")
-    assert "lmstudio" in settings["brains"]
+    assert "lmstudio" not in settings["brains"] and "gemini" in settings["brains"]
 
 
 def test_parse_arguments_tolerates_sloppy_output():
@@ -425,13 +412,13 @@ def test_router_uses_main_then_backup():
     assert [b.name for b in router.chain()] == ["gemini"]
     settings["backup_brain"] = "glm"
     assert [b.name for b in router.chain()] == ["gemini", "glm"]
-    settings["main_brain"], settings["backup_brain"] = "lmstudio", "lmstudio"
-    assert [b.name for b in router.chain()] == ["lmstudio"]
+    settings["main_brain"], settings["backup_brain"] = "glm", "glm"
+    assert [b.name for b in router.chain()] == ["glm"]
 
 
 def test_stage2_brain_settings_are_migrated():
     config.SETTINGS_FILE.write_text(json.dumps({"brain_mode": "auto", "local_brain": "lmstudio",
-                                                "cloud_brain": "glm"}), encoding="utf-8")
+                                                "cloud_brain": "glm", "escalate_after_steps": 12}), encoding="utf-8")
     settings = config.load_settings()
     assert settings["main_brain"] == "gemini" and "brain_mode" not in settings
     assert settings["brains"]["gemini"]["auto_switch_models"] is True
@@ -453,3 +440,14 @@ def test_placeholder_signatures_replace_foreign_ones():
     out = with_placeholder_signatures(msgs)
     assert out[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "skip_thought_signature_validator"
     assert msgs[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "OLD"
+
+
+def test_local_model_settings_are_removed():
+    config.SETTINGS_FILE.write_text(json.dumps({
+        "main_brain": "lmstudio", "backup_brain": "lmstudio",
+        "brains": {"lmstudio": {"label": "Local", "base_url": "http://localhost:1234/v1", "model": "x"}}}),
+        encoding="utf-8")
+    settings = config.load_settings()
+    assert "lmstudio" not in settings["brains"]
+    assert settings["main_brain"] == "gemini" and settings["backup_brain"] == ""
+    assert "escalate_after_steps" not in settings

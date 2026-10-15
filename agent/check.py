@@ -37,8 +37,7 @@ def check_brain(brain, role: str):
                    "Copy the exact name from the list into settings.json (brains > "
                    f"{brain.name} > model)")
     except Exception as e:
-        hint = ("Open LM Studio > Developer tab > load your model > Start Server"
-                if brain.is_local else "Check the key and your internet connection")
+        hint = "Check the key and your internet connection"
         report(FAIL, f"{role} brain {brain.label} not reachable: {str(e)[:200]}", hint)
         return
     try:
