@@ -147,3 +147,11 @@ def test_watch_reports_only_new_lines(site):
     NEWS.append("세 번째 공지")
     assert "세 번째 공지" in web.check_watch(number)
     assert web.check_watch(number) is None
+
+
+def test_labels_for_routines(site):
+    page = TOOLS["web_open"].call({"url": site + "/"})["page"]
+    number = ref(page, "새 탭으로 보기")
+    assert web.label_of_ref(number) == "새 탭으로 보기"
+    assert web.find_ref("새 탭으로 보기") == number
+    assert web.find_ref("없는 링크") is None

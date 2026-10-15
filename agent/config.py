@@ -116,6 +116,17 @@ DEFAULT_SETTINGS = {
     "open_popup_hotkey": "ctrl+alt+a",
     # Press this while the agent is working to stop it immediately.
     "stop_key": "esc",
+    # Select text in any app, press this, then pick an action (or say/type what to do with it).
+    "selection_hotkey": "ctrl+alt+w",
+    # The quick buttons shown for selected text: button label -> what the agent is asked to do.
+    "selection_actions": {
+        "다듬기": "선택한 글을 내 문체로 자연스럽게 다듬어서 그 자리에 바꿔 넣어줘. 원래 언어는 유지해줘.",
+        "맞춤법": "선택한 글의 맞춤법, 띄어쓰기, 문법만 고쳐서 바꿔 넣어줘. 내용과 말투는 바꾸지 마.",
+        "요약": "선택한 글을 3줄로 요약해서 보여줘. 바꿔 넣지는 마.",
+        "한국어로": "선택한 글을 자연스러운 한국어로 번역해서 그 자리에 바꿔 넣어줘.",
+        "English": "선택한 글을 자연스러운 영어로 번역해서 그 자리에 바꿔 넣어줘.",
+        "Deutsch": "선택한 글을 자연스러운 독일어로 번역해서 그 자리에 바꿔 넣어줘.",
+    },
 
     # Read short replies out loud with Windows voices.
     "speak_replies": True,

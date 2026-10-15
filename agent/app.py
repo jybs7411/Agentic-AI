@@ -26,7 +26,7 @@ class App:
         from agent.brains import BrainRouter
         from agent.hotkeys import Hotkeys
         from agent.tooling import load_all_tools
-        from agent.tools import screen, web
+        from agent.tools import routines, screen, web, writing
         from agent.transcriber import Transcriber
         from agent.ui import Popup, Tray
         from agent.usage import Usage
@@ -52,6 +52,8 @@ class App:
         web.configure(settings, ask_user=self._ask_user)
         self._screen = screen
         self._web = web
+        self._routines = routines
+        self._writing = writing
 
         self.tray = Tray(
             on_open=lambda: self.popup.show_window(focus=True),
@@ -68,7 +70,8 @@ class App:
             cost_text=self.cost_text,
         )
         self.hotkeys = Hotkeys(settings, on_talk_start=self.start_listening, on_talk_end=self.finish_listening,
-                               on_open_popup=lambda: self.popup.show_window(focus=True), on_stop=self.press_stop)
+                               on_open_popup=lambda: self.popup.show_window(focus=True), on_stop=self.press_stop,
+                               on_selection=self.capture_selection)
         threading.Thread(target=self._worker, daemon=True, name="agent-worker").start()
         threading.Thread(target=self._watch_timer, daemon=True, name="watch-timer").start()
 
@@ -121,6 +124,9 @@ class App:
             if kind == "watch":
                 self._run_watch(payload[0])
                 continue
+            if kind == "routine":
+                self.popup.show("info", f"[Routine] Starting '{payload[0]}' (scheduled)")
+                payload = [f"Run the routine '{payload[0]}' now (scheduled).", None]
             text, audio = payload
             self.tray.set_state("busy")
             try:
@@ -138,16 +144,22 @@ class App:
                 self.popup.show_window(focus=False)  # comes back after screen actions hid it
 
     def _watch_timer(self):
-        """Once a minute, queue checks for watched pages that are due (only while idle)."""
+        """Once a minute: start scheduled routines and page watches that are due (only while idle)."""
         while True:
             threading.Event().wait(60)
             if self.working or not self.jobs.empty():
                 continue
             try:
+                due = self._routines.due_routines()
+                if due:
+                    self._routines.mark_ran(due[0])
+                    self.working = True
+                    self.jobs.put(("routine", due[0]))
+                    continue
                 for watch_id in self._web.due_watches():
                     self.jobs.put(("watch", watch_id))
             except Exception:
-                log.exception("Watch timer failed")
+                log.exception("Timer failed")
 
     def _run_watch(self, watch_id: int):
         try:
@@ -174,6 +186,30 @@ class App:
             return ""
         self.popup.show("info", f"(voice) {text}")
         return text
+
+    # ---------------------------------------------------- selected text
+
+    def capture_selection(self):
+        """Selection hotkey: copy the selected text from the app in front and offer quick actions."""
+        if self.working:
+            self.popup.show("info", "Still working on the last command. Press Esc to stop it first.")
+            return
+
+        def work():
+            try:
+                data = self._writing.capture_selection()
+            except Exception as e:
+                log.exception("Selection capture failed")
+                self.popup.show("error", f"Could not read the selection: {e}")
+                return
+            if not data["text"].strip():
+                self.popup.show("info", "No text is selected. Highlight some text, then press "
+                                        f"{self.settings['selection_hotkey'].upper()} again.")
+                self.popup.show_window(focus=False)
+                return
+            self.popup.show_selection(data["text"], data["window"], self.settings["selection_actions"])
+
+        threading.Thread(target=work, daemon=True, name="selection").start()
 
     # ---------------------------------------------------- voice
 

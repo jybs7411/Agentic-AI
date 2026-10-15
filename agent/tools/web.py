@@ -355,6 +355,19 @@ def _snapshot(note: str = None) -> dict:
     return _view(1, note)
 
 
+def label_of_ref(number: int):
+    """The label shown for element [number] in the latest page view."""
+    match = re.search(r"\[" + str(int(number)) + r"\] [^\"\n]*\"([^\"\n]*)\"", "\n".join(_view_state["parts"]))
+    return match.group(1) if match and match.group(1) else None
+
+
+def find_ref(label: str):
+    """Read the page again and return the number of the element with this label (for routines)."""
+    _snapshot()
+    match = re.search(r"\[(\d+)\] [^\"\n]*\"" + re.escape(label) + "\"", "\n".join(_view_state["parts"]))
+    return int(match.group(1)) if match else None
+
+
 def _ref(number: int):
     page = _page()
     locator = page.locator(f'[data-agent-ref="{int(number)}"]')

@@ -86,6 +86,15 @@ class Popup:
                                     command=lambda: self._answer(True))
         self.yes_button.pack(side="right", padx=4)
 
+        # --- selected-text panel (hidden until the selection hotkey is used)
+        self.selection_frame = tk.Frame(root, bg="#eef3ff", padx=10, pady=8,
+                                        highlightbackground="#9db4ff", highlightthickness=1)
+        self.selection_label = tk.Label(self.selection_frame, text="", bg="#eef3ff", font=FONT_SMALL,
+                                        justify="left", anchor="w", wraplength=WIDTH - 50)
+        self.selection_label.pack(fill="x")
+        self.selection_buttons = tk.Frame(self.selection_frame, bg="#eef3ff")
+        self.selection_buttons.pack(fill="x", pady=(6, 0))
+
         # --- input row
         self.input_row = tk.Frame(root, bg=COLORS["bg"])
         self.input_row.pack(fill="x", padx=8, pady=(4, 8))
@@ -110,6 +119,33 @@ class Popup:
 
     def status(self, text: str):
         self.call(self.status_label.config, {"text": text})
+
+    def show_selection(self, text: str, window: str, actions: dict):
+        """Show the captured selection with quick-action buttons (called from any thread)."""
+        self.call(self._show_selection, text, window, actions)
+
+    def _show_selection(self, text: str, window: str, actions: dict):
+        preview = " ".join(text.split())
+        preview = preview[:160] + ("..." if len(preview) > 160 else "")
+        self.selection_label.config(text=f'Selected in "{window[:40]}" ({len(text)} chars):\n{preview}\n'
+                                         "Pick an action, or type / say what to do with it.")
+        for child in self.selection_buttons.winfo_children():
+            child.destroy()
+        row = None
+        for i, (label, command) in enumerate(actions.items()):
+            if i % 3 == 0:
+                row = tk.Frame(self.selection_buttons, bg="#eef3ff")
+                row.pack(fill="x")
+            tk.Button(row, text=label, width=12, font=FONT_SMALL,
+                      command=lambda c=command: self._selection_action(c)).pack(side="left", padx=2, pady=2)
+        tk.Button(self.selection_buttons, text="Close", font=FONT_SMALL, relief="flat", bg="#eef3ff",
+                  command=self.selection_frame.pack_forget).pack(anchor="e")
+        self.selection_frame.pack(fill="x", padx=8, pady=4, before=self.input_row)
+        self._show_window(focus=True)
+
+    def _selection_action(self, command: str):
+        self.selection_frame.pack_forget()
+        self.on_send(command)
 
     def set_brain(self, name: str):
         self.call(self.brain_var.set, self._label_of(name))
@@ -225,6 +261,7 @@ class Popup:
         text = self.entry.get().strip()
         if text:
             self.entry.delete(0, "end")
+            self.selection_frame.pack_forget()
             self.on_send(text)
 
     def _place_bottom_right(self):

@@ -5,7 +5,7 @@ import time
 
 
 class Hotkeys:
-    def __init__(self, settings: dict, on_talk_start, on_talk_end, on_open_popup, on_stop):
+    def __init__(self, settings: dict, on_talk_start, on_talk_end, on_open_popup, on_stop, on_selection=None):
         import keyboard
         self._keyboard = keyboard
         self.on_talk_start = on_talk_start
@@ -17,6 +17,8 @@ class Hotkeys:
         keyboard.add_hotkey(self.talk_hotkey, self._talk_pressed)
         keyboard.add_hotkey(settings["open_popup_hotkey"], on_open_popup)
         keyboard.add_hotkey(settings["stop_key"], on_stop)
+        if on_selection and settings.get("selection_hotkey"):
+            keyboard.add_hotkey(settings["selection_hotkey"], on_selection)
 
     def _talk_pressed(self):
         if self._talking:  # holding the keys repeats the event; ignore repeats

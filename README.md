@@ -2,8 +2,10 @@
 
 An AI agent for Windows that understands what you **say or type** (Korean, English, German, or a mix)
 and does it on your computer: files, apps, settings, **clicking and typing inside any app** by
-looking at the screen (Stage 2), and **working on websites in its own browser** (Stage 3):
-research, collecting data into Excel, filling forms, downloads, and watching pages for changes.
+looking at the screen (Stage 2), **working on websites in its own browser** (Stage 3): research,
+collecting data into Excel, filling forms, downloads, watching pages for changes, and **writing and
+routines** (Stage 4): fixing or translating selected text in any app, Word documents, email drafts
+in your own style, and saved routines that run by name or on a schedule.
 
 It lives in the **system tray** (the small icons next to the clock). Hold a hotkey and speak, or type
 in the popup. It asks your permission before anything risky, and it can undo file moves.
@@ -18,8 +20,8 @@ Voice is transcribed by Gemini: one small request per voice command.
 |---|---|---|
 | 1 | Voice/text commands, files and folders, apps and windows, system controls, memory, spoken replies | done |
 | 2 | Screen control (see, click, type in any app), local brain + cloud backup, cost tracking | done |
-| 3 | Web: own browser, research, data to Excel, forms, downloads, page watching | **this version** |
-| 4 | Writing into apps, repeatable workflows | next |
+| 3 | Web: own browser, research, data to Excel, forms, downloads, page watching | done |
+| 4 | Writing: selected text, Word documents, email drafts, your style; routines (recorded or described, scheduled) | **this version** |
 
 ---
 
@@ -103,6 +105,7 @@ Double-click **`start.bat`**. A round purple icon appears in the tray and the po
 |---|---|
 | **Hold `Ctrl + Alt + Space`**, speak, release | Voice command (Korean keyboard: use the **left** Alt) |
 | `Ctrl + Alt + A` or click the tray icon | Open the popup to type |
+| Select text anywhere, then **`Ctrl + Alt + W`** | Quick actions for that text: 다듬기, 맞춤법, 요약, 한국어로, English, Deutsch, or type/say your own |
 | **`Esc`** | Stop the agent immediately |
 | "AI:" box at the top of the popup | Choose the main AI |
 | Right-click the tray icon | **Main AI**, **Backup AI**, this month's paid-AI cost, new conversation, settings, memory, action log, quit |
@@ -132,6 +135,51 @@ On the web (Stage 3):
 - `정부24 전입신고 양식 열어서 내 정보로 채워줘` (it stops before submitting)
 - `이 사이트 공지사항 페이지에 새 글 올라오면 알려줘` (checks every hour)
 - `Lade den Monatsbericht von dieser Seite herunter`
+
+Writing (Stage 4):
+
+- Select a paragraph in Word or Gmail, press `Ctrl+Alt+W`, click **다듬기**. The text is replaced in place (`Ctrl+Z` undoes it)
+- Select text, hold the talk key and say `이거 독일어로 바꿔줘`
+- `오늘 회의 내용으로 회의록 워드 파일 만들어줘: 참석자 3명, 예산 확정, 다음 주 금요일 마감`
+- `김 팀장님께 회의 일정 변경 메일 초안 써줘` (Gmail opens with the draft filled in; you press Send)
+- `내 문서 폴더의 블로그 글 3개 읽고 내 문체 배워줘` / `내 문체 보여줘`
+
+Routines (Stage 4):
+
+- `아침 루틴 만들어줘: 날씨 알려주기, 네이버 뉴스 헤드라인 5개 요약, Gmail 열기. 평일 9시에 실행해줘`
+- (after doing a task) `방금 한 거 '보고서 받기'로 저장해줘`
+- `보고서 받기 실행해줘` / `루틴 목록 보여줘` / `아침 루틴은 8시 반으로 바꿔줘` / `아침 루틴 지워줘`
+
+### How writing works
+
+- **Selected text:** the agent copies your selection, writes the new version, and pastes it over the
+  selection in the same app. Your clipboard is restored afterwards. If the app lost the selection
+  in the meantime, the text is inserted at the cursor instead; `Ctrl+Z` in that app undoes it.
+  Change or add quick buttons in `settings.json` (`selection_actions`).
+- **Your style:** point the agent at a few texts you wrote (files, selected text, or the clipboard). It writes a
+  short, concrete description (tone, 존댓말 level, sentence length, typical greetings and closings,
+  favourite expressions, per language) to `data\style_guide.md` and follows it for drafts,
+  documents and rewrites. You can edit that file in Notepad.
+- **Word documents** get real headings, lists, tables and bold text, in a font that shows Korean properly.
+- **Emails** open as a pre-filled draft in your normal browser (Gmail by default; Outlook or your mail
+  app on request). The agent never sends anything; you do.
+
+### How routines work
+
+| | Described routine | Recorded routine |
+|---|---|---|
+| Made by | "아침 루틴 만들어줘: ..." (a list of steps in words) | "방금 한 거 저장해줘" (the actions of your previous command) |
+| Each run | The AI carries out the steps, adapting to the situation | The actions are replayed directly: fast, very few AI requests |
+| Best for | Changing content: news, mail, summaries | Fixed actions: open these apps and sites, click the same buttons, download the same report |
+
+- Recorded routines remember buttons and links **by their name**, so they are found again even when
+  the page or window changed a little. If a step still fails, the AI gets the original goal and
+  finishes the job itself.
+- Replays go through the **same safety checks**: risky steps still ask, and if you say **No** the
+  routine stops.
+- **Schedules** ("평일 9시", "월,수,금 18:30", "daily 07:00") run only while the agent is running. A run
+  missed by more than 15 minutes is skipped until the next scheduled time. Routines are stored in
+  `data\routines.json`.
 
 ### How web control works
 
@@ -248,6 +296,7 @@ Tray > **Edit settings** opens `settings.json`. Save it, then restart the agent 
 | `web_page_chars` | How much page text the AI reads at a time (lower = less memory for the local model) |
 | `web_blocked_sites` | Sites the agent must never open |
 | `watch_announcement` | What it says when a watched page changes |
+| `selection_hotkey`, `selection_actions` | The selected-text shortcut and its quick buttons (label -> instruction) |
 
 Paths in `settings.json` use `\\` for each `\`.
 
@@ -271,6 +320,10 @@ Paths in `settings.json` use `\\` for each `\`.
 | The site shows a robot check / CAPTCHA | The agent asks you to solve it in its browser window, then continues |
 | Web research hands over to the cloud a lot | The local model's context is full: use Context Length 32768 in LM Studio, or lower `web_page_chars` |
 | Watched page alerts never come | Watches only run while the agent is running; check `list_watches` ("지켜보는 페이지 보여줘") |
+| "No text is selected" with `Ctrl+Alt+W` | Highlight the text first. Some apps block copying; then copy it yourself and say "클립보드 글 다듬어줘" |
+| `Ctrl+Alt+W` types a strange character | Your keyboard layout uses Ctrl+Alt (AltGr) for that key: change `selection_hotkey` in settings |
+| The replaced text went to the wrong place | Click into the text again, select it, and retry; `Ctrl+Z` in the app undoes the paste |
+| A scheduled routine didn't run | The agent must be running at that time (see `add_to_startup.bat`); check `루틴 목록 보여줘` |
 
 When asking Claude for help, send the error text and the last lines of `data\agent.log`.
 
@@ -306,6 +359,8 @@ When asking Claude for help, send the error text and the last lines of `data\age
 | `agent/tools/files.py`, `apps.py`, `system.py`, `memory_tools.py` | Stage 1 actions |
 | `agent/tools/screen.py` | Stage 2: look at the screen, click, type, keys, scroll |
 | `agent/tools/web.py` | Stage 3: the agent's browser, page reading, forms, tables, downloads, page watching |
+| `agent/tools/writing.py` | Stage 4: selected text, Word documents, email drafts, style guide |
+| `agent/tools/routines.py` | Stage 4: saving, scheduling and replaying routines |
 | `agent/voice.py`, `agent/ui.py`, `agent/memory.py`, `agent/check.py` | Microphone and speech, popup and tray, memory, setup check |
 
 **Adding a new ability** = one Python function with `@tool(...)`, type hints and a clear docstring
