@@ -452,3 +452,27 @@ def test_local_model_settings_are_removed():
     assert "lmstudio" not in settings["brains"]
     assert settings["main_brain"] == "gemini" and settings["backup_brain"] == ""
     assert "escalate_after_steps" not in settings
+
+
+# ---------------------------------------------------------------- voice transcription
+
+def test_voice_sends_no_model_specific_options_and_survives_a_refusing_model(monkeypatch):
+    errors = pytest.importorskip("google.genai.errors")
+    from agent.transcriber import Transcriber
+
+    calls = []
+
+    class FakeModels:
+        def generate_content(self, model, contents, **options):
+            calls.append((model, options))
+            if model == "gemini-flash-lite-latest":
+                raise errors.ClientError(400, {"error": {"code": 400, "message": "Request contains an invalid argument.",
+                                                         "status": "INVALID_ARGUMENT"}})
+            return type("R", (), {"text": "메모장 열어줘"})()
+
+    transcriber = Transcriber("key", "gemini-flash-lite-latest")
+    transcriber._client = type("C", (), {"models": FakeModels()})()
+    monkeypatch.setattr(transcriber, "available_flash_models", lambda: ["gemini-flash-lite-latest", "gemini-2.5-flash-lite"])
+    assert transcriber.transcribe(b"RIFF") == "메모장 열어줘"
+    assert all(options == {} for _, options in calls)  # no thinking/temperature options
+    assert transcriber.model == "gemini-2.5-flash-lite"

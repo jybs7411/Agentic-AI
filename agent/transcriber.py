@@ -26,7 +26,6 @@ class Transcriber:
         self.extra_names = extra_names or (lambda: [])  # e.g. routine names, so they're spelled right
         self._client = None
         self._cooldown = {}
-        self._no_thinking_config = set()
 
     @property
     def client(self):
@@ -47,23 +46,26 @@ class Transcriber:
             raise BrainError(t("voice_no_key"))
         if self.model != self.preferred_model and self._cooldown.get(self.preferred_model, 0) < time.time():
             self.model = self.preferred_model
+        # No extra options (thinking settings, temperature): the "-latest" model names move to new model
+        # generations, and options one generation accepts can be refused by the next ("invalid argument").
+        switched_after_refusal = False
         for _ in range(4):
-            config = None
-            if self.model not in self._no_thinking_config:  # transcription needs no "thinking": faster
-                config = types.GenerateContentConfig(temperature=0, thinking_config=types.ThinkingConfig(thinking_budget=0))
             try:
                 response = self.client.models.generate_content(
                     model=self.model,
                     contents=[types.Part.from_bytes(data=wav, mime_type="audio/wav"), self._prompt()],
-                    config=config,
                 )
                 text = (response.text or "").strip()
                 return "" if text == "[silence]" else text
             except errors.ClientError as e:
                 detail = f"{e.message} {e.details}".lower()
-                if e.code == 400 and config is not None and "think" in detail:
-                    self._no_thinking_config.add(self.model)
-                    continue
+                if e.code == 400 and not switched_after_refusal:
+                    # This model refuses the request (e.g. a new model behind a "-latest" name): use another
+                    # Flash model for an hour instead of failing every voice command.
+                    switched_after_refusal = True
+                    self._cooldown[self.model] = time.time() + 3600
+                    if self._switch_model():
+                        continue
                 if e.code in (404, 429):
                     daily = any(w in detail for w in ("perday", "per day", "daily", "limit: 0")) or e.code == 404
                     self._cooldown[self.model] = _next_quota_reset() if daily else time.time() + 60
