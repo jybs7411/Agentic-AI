@@ -1,9 +1,9 @@
 """Where files live, and loading your settings.
 
-- `.env`           holds your Gemini API key (secret, never shared).
-- `settings.json`  holds everything you may want to change (hotkeys, model, voice...).
+- `.env`           holds your API keys (secret, never shared).
+- `settings.json`  holds everything you may want to change (hotkeys, AI models, voice...).
                    It is created automatically the first time the agent starts.
-- `data/`          holds memory, the action log and the undo journal.
+- `data/`          holds memory, the action log, the undo journal and the cloud cost record.
 """
 
 import json
@@ -18,12 +18,83 @@ ENV_FILE = ROOT / ".env"
 MEMORY_FILE = DATA_DIR / "memory.json"
 ACTION_LOG_FILE = DATA_DIR / "actions.log"
 UNDO_FILE = DATA_DIR / "undo.json"
+USAGE_FILE = DATA_DIR / "usage.json"
 ERROR_LOG_FILE = DATA_DIR / "agent.log"
 
+# AI "brains" the agent can think with. All of them speak the OpenAI-compatible API.
+# Prices are US dollars per 1 million tokens, used only to track your monthly spending.
+# They are estimates: check the provider's price page and correct them if needed.
+DEFAULT_BRAINS = {
+    "lmstudio": {
+        "label": "Local (LM Studio)",
+        "base_url": "http://localhost:1234/v1",
+        "api_key_env": "",
+        "model": "qwen/qwen3-vl-8b",
+        "vision": True,
+        "price_input": 0, "price_output": 0,
+        "timeout": 300,
+    },
+    "glm": {
+        "label": "GLM-4.6V (Z.ai)",
+        "base_url": "https://api.z.ai/api/paas/v4/",
+        "api_key_env": "ZAI_API_KEY",
+        "model": "glm-4.6v",
+        "vision": True,
+        "price_input": 0.3, "price_output": 0.9,
+        "timeout": 120,
+    },
+    "glm-flash": {
+        "label": "GLM-4.6V-Flash (Z.ai, free)",
+        "base_url": "https://api.z.ai/api/paas/v4/",
+        "api_key_env": "ZAI_API_KEY",
+        "model": "glm-4.6v-flash",
+        "vision": True,
+        "price_input": 0, "price_output": 0,
+        "timeout": 120,
+    },
+    "qwen": {
+        "label": "Qwen-VL (Alibaba Cloud)",
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "model": "qwen3-vl-plus",
+        "vision": True,
+        "price_input": 0.2, "price_output": 1.6,
+        "timeout": 120,
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "base_url": "https://api.deepseek.com",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "model": "deepseek-chat",
+        "vision": False,
+        "price_input": 0.3, "price_output": 1.2,
+        "timeout": 120,
+    },
+    "gemini": {
+        "label": "Gemini (Google)",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key_env": "GEMINI_API_KEY",
+        "model": "gemini-flash-latest",
+        "vision": True,
+        "price_input": 0, "price_output": 0,
+        "timeout": 120,
+    },
+}
+
 DEFAULT_SETTINGS = {
-    # Gemini model name. "gemini-flash-latest" is Google's alias for the newest Flash model.
-    # If it stops working, the agent picks another available Flash model automatically.
-    "model": "gemini-flash-latest",
+    # Which brains to use. "auto" = local first, cloud when local is off or gets stuck.
+    "brain_mode": "auto",            # "auto", "local" or "cloud"
+    "local_brain": "lmstudio",
+    "cloud_brain": "glm",
+    # In auto mode: hand the task to the cloud after this many steps or this many failed actions in a row.
+    "escalate_after_steps": 12,
+    "escalate_after_errors": 3,
+    # Stop using paid cloud brains when this month's estimated cost reaches this (US dollars).
+    "cloud_monthly_budget_usd": 6.0,
+    "brains": DEFAULT_BRAINS,
+
+    # Voice commands are transcribed by Gemini (one small request per command).
+    "voice_model": "gemini-flash-latest",
 
     # Hold this to talk, release to send.
     "push_to_talk_hotkey": "ctrl+alt+space",
@@ -38,11 +109,11 @@ DEFAULT_SETTINGS = {
     "speech_rate": 1,
 
     # Safety limits.
-    "max_steps_per_command": 20,
+    "max_steps_per_command": 25,
     "max_recording_seconds": 60,
 
     # How much of the conversation the agent keeps in mind.
-    "conversation_turns_to_keep": 8,
+    "conversation_turns_to_keep": 6,
     "new_conversation_after_idle_minutes": 30,
 
     # Tool names that must ALWAYS ask you first (e.g. "move_item"), or NEVER ask (use with care).
@@ -52,53 +123,73 @@ DEFAULT_SETTINGS = {
     # Extra folders the agent must ask before changing anything inside (e.g. "D:\\Important").
     "extra_protected_folders": [],
 
-    # Windows whose title contains one of these words are never captured in screenshots (Stage 2).
+    # Screen control (Stage 2).
+    # Windows whose title contains one of these words are never captured in screenshots.
     "screenshot_blocklist": ["1Password", "Bitwarden", "KeePass", "LastPass", "Bank", "은행", "Banking"],
+    # Screenshots are shrunk to this width before being sent (smaller = cheaper and faster).
+    "screenshot_max_width": 1280,
+    # Clicking a button whose name contains one of these words asks you first.
+    "risky_click_words": [
+        "send", "보내기", "전송", "senden", "delete", "삭제", "löschen", "remove", "제거", "entfernen",
+        "buy", "구매", "구입", "kaufen", "pay", "결제", "지불", "bezahlen", "order", "주문", "bestellen",
+        "submit", "제출", "post", "게시", "publish", "install", "설치", "uninstall", "format", "포맷",
+        "transfer", "송금", "이체", "sign out", "로그아웃", "탈퇴", "unsubscribe",
+    ],
+    # In these programs, pressing Enter usually sends a message, so it asks you first.
+    "messaging_apps": ["kakaotalk", "slack", "discord", "teams", "telegram", "whatsapp", "line",
+                       "outlook", "thunderbird", "signal", "wechat", "messenger"],
 }
 
 
 def load_settings() -> dict:
     """Read settings.json, adding any missing options with their default value."""
-    settings = dict(DEFAULT_SETTINGS)
-    if SETTINGS_FILE.exists():
-        try:
-            user_settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            settings.update(user_settings)
-        except json.JSONDecodeError as e:
-            raise ValueError(
-                f"settings.json has a typo near line {e.lineno}: {e.msg}. "
-                "Fix it, or delete the file to get the defaults back."
-            ) from e
+    settings = json.loads(json.dumps(DEFAULT_SETTINGS))  # deep copy
+    raw = _read_raw_settings()
+    if raw is not None:
+        # Stage 1 used "model" for Gemini; it is now only used for voice.
+        if "model" in raw and "voice_model" not in raw:
+            raw["voice_model"] = raw["model"]
+        raw.pop("model", None)
+        user_brains = raw.pop("brains", {})
+        settings.update(raw)
+        for name, profile in user_brains.items():
+            settings["brains"][name] = {**settings["brains"].get(name, {}), **profile}
     if settings != _read_raw_settings():
         save_settings(settings)
     return settings
 
 
 def _read_raw_settings():
+    if not SETTINGS_FILE.exists():
+        return None
     try:
         return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"settings.json has a typo near line {e.lineno}: {e.msg}. "
+            "Fix it, or delete the file to get the defaults back."
+        ) from e
 
 
 def save_settings(settings: dict) -> None:
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def load_api_key() -> str:
-    """Read GEMINI_API_KEY from the .env file (or the environment)."""
+def load_env() -> None:
     try:
         from dotenv import load_dotenv
         load_dotenv(ENV_FILE)
     except ImportError:
         pass
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key or key == "paste-your-key-here":
-        raise ValueError(
-            "No Gemini API key found. Open the file '.env' in the agent folder and put your key "
-            "after GEMINI_API_KEY="
-        )
-    return key
+
+
+def get_key(env_name: str) -> str:
+    """Read an API key from .env. Returns "" when it isn't set."""
+    if not env_name:
+        return ""
+    load_env()
+    key = os.environ.get(env_name, "").strip()
+    return "" if key.startswith("paste-your") else key
 
 
 def ensure_data_dir() -> None:

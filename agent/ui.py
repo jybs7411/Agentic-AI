@@ -6,6 +6,7 @@ never touch widgets directly: they call Popup.call(...), which queues the change
 
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import scrolledtext
 
@@ -118,6 +119,20 @@ class Popup:
     def hide(self):
         self.root.withdraw()
 
+    def hide_and_wait(self):
+        """Hide the popup before the agent looks at or clicks the screen (called from the worker)."""
+        if not self._visible():
+            return
+        done = threading.Event()
+
+        def do():
+            self.root.withdraw()
+            done.set()
+
+        self.call(do)
+        done.wait(1.0)
+        time.sleep(0.2)  # let the windows underneath repaint
+
     def run(self):
         self.root.mainloop()
 
@@ -158,13 +173,22 @@ class Popup:
         self._hide_confirm()
         self._confirm_event.set()
 
+    def _visible(self) -> bool:
+        try:
+            return self.root.state() != "withdrawn"
+        except tk.TclError:
+            return False
+
     def _show_window(self, focus: bool):
+        previous = _foreground_window()
         self.root.deiconify()
         self.root.lift()
         if focus:
             self.root.focus_force()
             if not self.confirm_frame.winfo_ismapped():
                 self.entry.focus_set()
+        elif previous:
+            _set_foreground(previous)  # show the popup but leave the keyboard with the app you were using
 
     def _send(self):
         text = self.entry.get().strip()
@@ -180,6 +204,22 @@ class Popup:
         self.root.geometry(f"{WIDTH}x{HEIGHT}+{x}+{y}")
 
 
+def _foreground_window():
+    try:
+        import ctypes
+        return ctypes.windll.user32.GetForegroundWindow()
+    except Exception:
+        return None
+
+
+def _set_foreground(hwnd):
+    try:
+        import ctypes
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------- tray icon
 
 def _icon_image(color: str):
@@ -192,14 +232,27 @@ def _icon_image(color: str):
 
 
 class Tray:
-    def __init__(self, on_open, on_new_conversation, on_settings, on_memory, on_log, on_quit):
+    def __init__(self, on_open, on_new_conversation, on_settings, on_memory, on_log, on_quit,
+                 get_mode, set_mode, cost_text):
         import pystray
         self.normal_image = _icon_image(COLORS["accent"])
         self.listening_image = _icon_image("#c62828")
         self.busy_image = _icon_image("#e0a100")
+
+        def mode_item(text, mode):
+            return pystray.MenuItem(text, lambda: set_mode(mode), checked=lambda item: get_mode() == mode,
+                                    radio=True)
+
         menu = pystray.Menu(
             pystray.MenuItem("Open", lambda: on_open(), default=True),
             pystray.MenuItem("New conversation", lambda: on_new_conversation()),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Brain", pystray.Menu(
+                mode_item("Auto: local first, cloud as backup", "auto"),
+                mode_item("Local only (free, private)", "local"),
+                mode_item("Cloud only", "cloud"),
+            )),
+            pystray.MenuItem(lambda item: cost_text(), lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Edit settings", lambda: on_settings()),
             pystray.MenuItem("Open memory", lambda: on_memory()),
@@ -212,6 +265,10 @@ class Tray:
 
     def set_state(self, state: str):
         self.icon.icon = {"listening": self.listening_image, "busy": self.busy_image}.get(state, self.normal_image)
+        try:
+            self.icon.update_menu()  # refresh the cost line and the selected brain
+        except Exception:
+            pass
 
     def stop(self):
         self.icon.stop()

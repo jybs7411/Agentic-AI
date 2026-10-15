@@ -103,25 +103,29 @@ def _is_cloaked(hwnd) -> bool:
 
 
 def _windows() -> list:
+    """Visible top-level windows, front-most first (Windows lists them in z-order)."""
     import psutil
     import win32gui
     import win32process
 
     found = []
+    own_pid = os.getpid()
 
     def collect(hwnd, _):
         if not win32gui.IsWindowVisible(hwnd):
             return
         title = win32gui.GetWindowText(hwnd)
-        if not title or title in ("Program Manager", "Agent") or _is_cloaked(hwnd):
+        if not title or title == "Program Manager" or _is_cloaked(hwnd):
             return
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        if pid == own_pid:  # skip the agent's own popup
+            return
         try:
             process = psutil.Process(pid).name()
         except Exception:
             process = "?"
         found.append({"id": hwnd, "title": title, "program": process,
-                      "minimized": bool(win32gui.IsIconic(hwnd))})
+                      "minimized": bool(win32gui.IsIconic(hwnd)), "rect": win32gui.GetWindowRect(hwnd)})
 
     win32gui.EnumWindows(collect, None)
     return found
@@ -152,23 +156,27 @@ def focus_window(title_or_program: str) -> dict:
     Args:
       title_or_program: Part of the window title or the program name, e.g. "Chrome" or "report.docx".
     """
-    import win32api
-    import win32con
-    import win32gui
-
     window, error = _one_window(title_or_program)
     if error:
         return error
-    hwnd = window["id"]
+    bring_to_front(window["id"])
+    return {"focused": window["title"]}
+
+
+def bring_to_front(hwnd: int):
+    import win32api
+    import win32con
+    import win32gui
     if win32gui.IsIconic(hwnd):
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
     # Windows only lets the active app change focus; tapping Alt works around that.
     win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
     try:
         win32gui.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
     finally:
         win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
-    return {"focused": window["title"]}
 
 
 def _show_window(title_or_program: str, command: int, verb: str) -> dict:

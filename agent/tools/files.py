@@ -12,7 +12,7 @@ from agent import config
 from agent.safety import is_protected
 from agent.tooling import tool
 
-MAX_READ_CHARS = 20000
+MAX_READ_CHARS = 8000
 SKIP_DIRS = {"appdata", "node_modules", "$recycle.bin", "__pycache__", ".git", "system volume information",
              "windows", "program files", "program files (x86)", "programdata", ".venv", "venv"}
 EXECUTABLE_EXTS = {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".msi", ".msp",

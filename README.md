@@ -1,181 +1,240 @@
 # Desktop Agent
 
 An AI agent for Windows that understands what you **say or type** (Korean, English, German, or a mix)
-and does it on your computer, using the free Gemini API.
+and does it on your computer: files, apps, settings, and (since Stage 2) **clicking and typing
+inside any app** by looking at the screen.
 
 It lives in the **system tray** (the small icons next to the clock). Hold a hotkey and speak, or type
 in the popup. It asks your permission before anything risky, and it can undo file moves.
 
-> **Stage 1** (this version): voice and text commands, files and folders, apps and windows, system
-> controls, memory, spoken replies.
-> Coming next: Stage 2 (screen vision, mouse and keyboard control), Stage 3 (web automation),
-> Stage 4 (writing into apps).
+**Brains:** by default it thinks with a **local AI model in LM Studio** (free, private, no limits).
+When the local model is off or gets stuck, a **cheap cloud model** takes over (default: GLM-4.6V from
+Z.ai), with a **monthly budget cap**. Voice is transcribed by Gemini's free API: one small request
+per voice command.
+
+| Stage | What | Status |
+|---|---|---|
+| 1 | Voice/text commands, files and folders, apps and windows, system controls, memory, spoken replies | done |
+| 2 | Screen control (see, click, type in any app), local brain + cloud backup, cost tracking | **this version** |
+| 3 | Web automation | next |
+| 4 | Writing into apps, repeatable workflows | later |
 
 ---
 
-## 1. Install (one time)
+## 1. Install or update
 
-You need **Windows 10/11**, **Python 3.10+** and a **Gemini API key** (free at
-<https://aistudio.google.com/apikey>).
+You need **Windows 10/11** and **Python 3.10+**.
 
-1. Download this project: on GitHub click **Code > Download ZIP**, then unzip it somewhere simple,
-   for example `C:\Agent`. Avoid folders that contain Korean characters or spaces if you can.
-2. Double-click **`install.bat`**. It sets everything up, which takes a few minutes the first time.
-3. When Notepad opens, paste your key after `GEMINI_API_KEY=`, then save with `Ctrl+S` and close Notepad.
-4. A check runs automatically. Every line should say `[ OK ]` (`[WARN]` is fine).
+**Updating from Stage 1?** Copy the new files over the old folder (your `.env`, `settings.json` and
+`data` folder are kept), then run **`install.bat`** again to add the new libraries. Your settings
+are upgraded automatically.
 
-If anything says `[FAIL]`, the line under it tells you how to fix it. Run **`check_setup.bat`** again
-any time.
+**New install:** unzip the project to a simple folder such as `C:\Agent`, then double-click
+**`install.bat`**. When Notepad opens the `.env` file, paste your keys (see below), save, and close it.
+
+### 1a. Local brain: LM Studio (free)
+
+1. Install **LM Studio** from <https://lmstudio.ai>.
+2. In LM Studio, search for **`qwen3-vl-8b`** and download it (pick a **Q4_K_M** version, about 5-6 GB).
+   It can read screenshots and use tools, and fits an 8-12 GB graphics card.
+3. Go to the **Developer** tab, select the model to load, and before loading set:
+   - **Context Length: 16384** (with a 12 GB card you can try 32768)
+   - **GPU Offload: maximum**
+4. Load the model and switch the server **on** (it runs at `http://localhost:1234`).
+5. Run **`check_setup.bat`**. It lists the model names LM Studio reports. If the line says
+   `Model '...' is not in that list`, copy the exact name into `settings.json` under
+   `brains > lmstudio > model`.
+
+LM Studio must be running with the model loaded while you use the agent. If it isn't, the agent
+uses the cloud brain instead and tells you.
+
+### 1b. Cloud backup brain: Z.ai GLM (cheap)
+
+1. Create an account at <https://z.ai>, open **API Keys**, create a key.
+2. Put it in `.env` as `ZAI_API_KEY=...`
+3. Add a small amount of credit in your Z.ai account. The default model `glm-4.6v` costs about
+   $0.30 per million input tokens and $0.90 per million output tokens (Z.ai price page, Oct 2026).
+   `glm-4.6v-flash` is listed as free: set `"cloud_brain": "glm-flash"` to try it.
+
+### 1c. Voice: Gemini (free)
+
+Keep `GEMINI_API_KEY=...` in `.env` (free at <https://aistudio.google.com/apikey>). It is only used
+to turn your voice into text, once per voice command. Without it, typing still works.
+
+Run **`check_setup.bat`** after any change. `[FAIL]` lines tell you what to fix.
 
 ## 2. Start
 
 Double-click **`start.bat`**. A round purple icon appears in the tray and the popup opens.
 
-- Want it to start with Windows? Double-click **`add_to_startup.bat`** once.
-- Something wrong? Use **`start_debug.bat`** instead, which shows errors in a black window.
+- Start with Windows: double-click **`add_to_startup.bat`** once.
+- Something wrong? Use **`start_debug.bat`** to see errors, or open `data\agent.log`.
 
 ## 3. Use it
 
 | Do this | To |
 |---|---|
-| **Hold `Ctrl + Alt + Space`**, speak, then release | Give a voice command |
-| `Ctrl + Alt + A` (or click the tray icon) | Open the popup to type |
+| **Hold `Ctrl + Alt + Space`**, speak, release | Voice command (Korean keyboard: use the **left** Alt) |
+| `Ctrl + Alt + A` or click the tray icon | Open the popup to type |
 | **`Esc`** | Stop the agent immediately |
-| Right-click the tray icon | New conversation, settings, memory, action log, quit |
+| Right-click the tray icon | **Brain** (auto / local only / cloud only), this month's cloud cost, new conversation, settings, memory, action log, quit |
 
-> **Korean keyboard:** the right `Alt` key is the 한/영 key, so use the **left** `Ctrl` + **left** `Alt` + `Space`.
-
-The tray icon's color shows what it's doing: **purple** = ready, **red** = listening,
-**yellow** = working.
+Tray icon color: **purple** = ready, **red** = listening, **yellow** = working.
 
 ### Things you can say
 
-- `다운로드 폴더에 있는 PDF들을 "PDF" 폴더로 정리해줘`
-- `어제 수정한 보고서 찾아서 요약해줘`
-- `크롬 열어줘` / `메모장 닫아줘` / `볼륨 30으로 해줘` / `화면 밝기 70`
-- `방금 옮긴 거 되돌려줘` (undo)
-- `기억해: 내 프로젝트 폴더는 D:\Work야` (it remembers this next time too)
-- `Find the biggest files on my desktop`
-- `Öffne den Rechner` / `Wie viel Speicherplatz habe ich noch?`
-- `What's using all my memory?`
+Files, apps, system (Stage 1):
 
-## 4. Safety: what it may do alone, and what it asks first
+- `다운로드 폴더에 있는 PDF들을 "PDF" 폴더로 정리해줘` / `방금 옮긴 거 되돌려줘`
+- `크롬 열어줘` / `볼륨 30으로 해줘` / `Öffne den Rechner`
+
+Inside apps (Stage 2):
+
+- `메모장 열고 "회의록"이라고 써줘`
+- `지금 화면에 뭐가 있는지 알려줘`
+- `이 에러 메시지 읽어줘` (reads the text of the front window)
+- `탐색기에서 문서 폴더 열고 정렬을 날짜순으로 바꿔줘`
+- `Click the Save button` / `저장 버튼 눌러줘`
+
+### How screen control works
+
+1. The agent hides its popup and looks at the **front window**.
+2. Windows itself tells the agent what buttons, fields and menus that window contains (UI
+   Automation). The agent draws a **numbered box** on each one in a screenshot.
+3. The AI answers with "click 7" or "type into 3". That is far more reliable than guessing pixel
+   positions, especially for small local models.
+4. If something has no number (a drawing canvas, some games), it clicks by position (percent of the screen).
+
+Before each click the agent checks that the element is still there. If the screen changed, it
+looks again instead of clicking blindly.
+
+**Tips:** put the app you want controlled in front. Things go faster if you name the button
+("저장 버튼 눌러"). Multi-monitor setups work: it uses the monitor the front window is on.
+
+## 4. Safety
 
 **Runs automatically:** opening, reading, searching, listing; creating folders; copying; moving and
-renaming (these can be undone); volume, brightness, settings pages, web pages.
+renaming (undo-able); volume, brightness, settings pages, web pages; looking at the screen; normal
+clicks and typing.
 
-**Asks you first** (a yellow box with **Yes** / **No**, and a beep):
+**Asks you first** (yellow box, **Yes** / **No**, beep; "No" is the default button):
 
-- deleting (it goes to the **Recycle Bin**, so you can restore it)
-- replacing or overwriting an existing file (the old one goes to the Recycle Bin)
-- anything inside system folders (`C:\Windows`, `Program Files`, `AppData`, ...)
-- moving more than 25 items at once
-- closing windows (unsaved work) and force-quitting programs
-- running `.exe`, `.bat` or script files
-- running commands
-- shut down, restart, sleep, sign out
+- deleting (to the Recycle Bin), overwriting, anything in system folders, moving 25+ items
+- closing windows, force-quitting programs, running programs or scripts, running commands
+- shut down / restart / sleep / sign out
+- **clicking a button named like send / 보내기 / delete / 삭제 / buy / 구매 / pay / 결제 / submit / install / 송금 ...**
+  (the full list is `risky_click_words` in settings)
+- **pressing Enter in messaging apps** (KakaoTalk, Slack, Discord, Teams, Outlook...): that usually *sends*
+- `Alt+F4`, `Shift+Delete`
 
-**No** is the default button, so pressing Enter by accident never approves anything.
+**Privacy guards:**
 
-Other safety features:
+- Screenshots are never taken while a window from `screenshot_blocklist` (password managers,
+  banking) is visible, and the agent refuses to read such a window at all.
+- The agent treats text on screen, in files and in web pages as *data*, never as orders.
 
-- **Undo:** every move and rename is recorded. Say "undo that" / "되돌려줘".
-- **Action log:** every action is written to `data\actions.log` (tray > *Open action log*).
-- **Step limit:** a command stops after 20 steps.
-- **Prompt-injection guard:** the agent is told that text inside files, web pages and command output
-  is *data*, not orders. If a document says "delete everything", it reports this to you and does nothing.
+**Honest limits:** the agent can't know what *every* click does. A button named "OK" in an
+online shop can still confirm an order. Watch the first runs in new apps, and remember **Esc**.
+Every action is written to `data\actions.log`.
 
-You can make it stricter or looser in `settings.json` (below).
+## 5. Brains and costs
 
-## 5. Settings
+| Brain (settings name) | Cost (per 1M tokens, input / output) | Sees screenshots | Notes |
+|---|---|---|---|
+| `lmstudio` (default local) | free | yes (Qwen3-VL) | private: nothing leaves your PC |
+| `glm` (default cloud) | ~$0.30 / $0.90 | yes | Z.ai official price page |
+| `glm-flash` | listed as free | yes | rate limits likely |
+| `qwen` | ~$0.20 / $1.60 (unverified) | yes | Alibaba Cloud (international) |
+| `deepseek` | ~$0.30 / $1.20 (unverified) | no | uses the element list instead of pictures |
+| `gemini` | free tier | yes | the free limits that ran out in Stage 1 |
+
+- **Auto mode** (default): the local brain works first. The cloud takes over when LM Studio is off,
+  or when the local model is stuck (3 failed actions in a row, or 12 steps without finishing; both
+  adjustable). Choose *Local only* in the tray if you never want to pay.
+- **Budget:** paid cloud use stops when `cloud_monthly_budget_usd` (default **$6**, about 8,000 KRW) is
+  reached. The tray menu shows this month's spending. Details are in `data\usage.json`.
+- **Rough cost:** one cloud step sends about 6,000-10,000 tokens (instructions, tools, conversation,
+  screenshot). With GLM-4.6V that's around $0.003 per step, so a 5-step task is about 1-2 cents.
+  This is an estimate; your real numbers appear in the tray.
+- **Prices in `settings.json` are estimates** used for the budget. Correct them if your
+  provider's page says otherwise.
+- **Privacy:** with a cloud brain, your commands, file contents the agent reads, and screenshots go
+  to that company's servers. Z.ai (Zhipu), Alibaba and DeepSeek are Chinese companies. If that
+  matters for a task, switch the tray to **Local only** first.
+
+## 6. Settings
 
 Tray > **Edit settings** opens `settings.json`. Save it, then restart the agent (tray > Quit, then `start.bat`).
 
 | Setting | What it does |
 |---|---|
-| `model` | Gemini model. `gemini-flash-latest` always points to Google's newest Flash model |
-| `push_to_talk_hotkey`, `open_popup_hotkey`, `stop_key` | Your shortcuts |
-| `speak_replies`, `speech_rate` | Spoken replies on/off, speed from -10 to 10 |
-| `always_confirm_tools` | Tool names that must always ask, e.g. `["move_item", "move_many"]` |
-| `never_confirm_tools` | Tool names that never ask (careful!) |
-| `extra_protected_folders` | Your own "ask before touching" folders, e.g. `["D:\\Important"]` |
-| `max_steps_per_command` | Safety limit per command |
-| `conversation_turns_to_keep` | How many recent commands it keeps in mind |
+| `brain_mode` | `"auto"`, `"local"` or `"cloud"` (also in the tray menu) |
+| `local_brain`, `cloud_brain` | Which entries of `brains` to use |
+| `brains` | Each brain's address, model name, price, and whether it can see images |
+| `escalate_after_steps`, `escalate_after_errors` | When auto mode hands a task to the cloud |
+| `cloud_monthly_budget_usd` | Monthly spending cap for paid brains |
+| `voice_model` | Gemini model for voice recognition |
+| `risky_click_words`, `messaging_apps` | Words and apps that make clicks / Enter ask first |
+| `screenshot_blocklist` | Window titles that are never captured |
+| `screenshot_max_width` | Screenshot size sent to the AI (smaller = cheaper and faster) |
+| `always_confirm_tools`, `never_confirm_tools` | Make any tool always / never ask |
+| `push_to_talk_hotkey`, `open_popup_hotkey`, `stop_key` | Shortcuts |
+| `speak_replies`, `speech_rate` | Spoken replies |
 
-`settings.json` uses `\\` for each `\` in paths.
+Paths in `settings.json` use `\\` for each `\`.
 
-## 6. Voices (spoken replies)
-
-Replies are read aloud with the voices installed in Windows. The agent picks a Korean, German or
-English voice to match the language of the reply. If no voice is installed for a language, that
-reply is only shown, not spoken.
-
-**To add a voice:** Settings > Time & language > Speech > *Manage voices* > **Add voices**, then choose Korean
-(한국어) or German (Deutsch). Then run `check_setup.bat` to see which voices the agent can use.
-
-Some newer Windows voices don't appear to older programs. If the voice you added doesn't show in
-`check_setup.bat`, tell me (Claude) and I'll switch the agent to the newer Windows voice system.
-
-## 7. About the free Gemini API
-
-- **Limits.** Every step of a task is one request, and the free tier allows only a limited number of
-  requests per minute and per day. When the per-minute limit is hit, the agent waits and shows a
-  countdown. When the daily limit is hit, it switches to another free Flash model if one is
-  available. Daily limits reset at midnight Pacific time (about 4–5 pm in Korea). See your exact
-  limits in Google AI Studio.
-- **Privacy.** On the free tier, Google may use what you send (your commands, file contents the agent
-  reads and, in Stage 2, screenshots) to improve its products, and people may review it. Don't ask it
-  to read documents you would not want Google to see. A paid key changes these terms.
-- **Model names change often.** If your model stops working, the agent picks another available Flash
-  model automatically and tells you.
-
-## 8. Troubleshooting
+## 7. Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| Nothing happens when I double-click `start.bat` | Run `start_debug.bat` and read the error, or open `data\agent.log` |
-| Hotkey doesn't work | It doesn't work while an *administrator* window is in front (e.g. Task Manager). Click elsewhere first. Check that no other program uses the same shortcut |
-| "No microphone found" | Settings > Privacy & security > Microphone: allow **desktop apps** to use it |
-| "Too short - hold the keys while you speak" | Keep holding until you finish talking |
-| "Your Gemini API key is not valid" | Re-copy the key into `.env` with no spaces or quotes |
-| "The agent is already running" | Look for the round icon in the tray (click ^ next to the clock) |
-| It opened the wrong app | Say the exact Start-menu name, or ask "list my apps with 'adobe'" |
+| "can't reach LM Studio" | Open LM Studio, load the model, switch the server on (Developer tab) |
+| "model ... not found" | Run `check_setup.bat`, copy the exact model name into `settings.json` |
+| "conversation is too long for the model" | Reload the model in LM Studio with a bigger Context Length; or tray > New conversation |
+| Local model is slow | Make sure GPU Offload is at maximum; close games/other GPU apps; try a smaller Context Length |
+| Local model clicks the wrong thing | Name the button in your command; or switch to Cloud for that task |
+| It clicked inside its own popup / typed in the wrong window | Click the app you want first so it's in front, then give the command |
+| "this month's cloud budget is used up" | Raise `cloud_monthly_budget_usd`, or use Local only |
+| Hotkey doesn't work | It doesn't work while an *administrator* window (e.g. Task Manager) is in front |
+| Can't control an app at all | Apps running as administrator can't be controlled by a normal program |
+| "Gemini's free voice limit is used up" | Type instead; it resets daily (about 4-5 pm in Korea) |
 
-When asking Claude for help, send the text of the error and the last lines of `data\agent.log`.
+When asking Claude for help, send the error text and the last lines of `data\agent.log`.
 
-## 9. How it works (for the curious)
+## 8. How it works (for the curious)
 
 ```
  You (voice / text)
       |
       v
- popup / hotkeys / tray ---> App ---> Agent loop ---------------------+
-                                          |                           |
-                                          v                           |
-                                Gemini: answer, or call tools         |
-                                          |                           |
-                                          v                           |
-                         safety check -> ask you? -> run tool --------+
-                                          |
-                                          v
-                            short answer, shown + spoken
+ popup / hotkeys / tray -> App -> worker thread -> Agent loop ------------------+
+       (voice -> Gemini -> text)                       |                        |
+                                                       v                        |
+                                  brain (local LM Studio, or cloud backup)      |
+                                         answers, or calls tools                |
+                                                       |                        |
+                                                       v                        |
+                                  safety check -> ask you? -> run tool ---------+
+                                  (look_at_screen adds a numbered screenshot)
+                                                       |
+                                                       v
+                                         short answer, shown + spoken
 ```
 
 | File | Role |
 |---|---|
-| `agent/app.py` | Starts everything and connects the parts |
-| `agent/agent.py` | The agent loop and its instructions (system prompt) |
-| `agent/brain.py` | Gemini connection: rate limits, retries, model fallback |
-| `agent/tooling.py` | The `@tool` system: a docstring becomes the tool's description for Gemini |
+| `agent/app.py` | Starts everything, the worker thread, tray brain menu |
+| `agent/agent.py` | The agent loop, system prompt, local -> cloud hand-off |
+| `agent/brains.py` | OpenAI-compatible brains: retries, budget, image fallback |
+| `agent/usage.py` | Monthly token and cost tracking |
+| `agent/transcriber.py` | Voice -> text with Gemini |
+| `agent/tooling.py` | The `@tool` system (docstring + type hints -> tool description) |
 | `agent/safety.py` | Protected folders, action log, stop switch |
-| `agent/tools/*.py` | The actual actions (files, apps, system, memory) |
-| `agent/voice.py` | Microphone recording and spoken replies |
-| `agent/ui.py` | The popup and the tray icon |
-| `agent/memory.py` | Long-term memory (`data\memory.json`, editable in Notepad) |
-| `agent/check.py` | The setup checker |
+| `agent/tools/files.py`, `apps.py`, `system.py`, `memory_tools.py` | Stage 1 actions |
+| `agent/tools/screen.py` | Stage 2: look at the screen, click, type, keys, scroll |
+| `agent/voice.py`, `agent/ui.py`, `agent/memory.py`, `agent/check.py` | Microphone and speech, popup and tray, memory, setup check |
 
-**Adding a new ability** = writing one Python function with `@tool(...)` and a clear docstring in
-`agent/tools/`. Gemini sees it automatically.
+**Adding a new ability** = one Python function with `@tool(...)`, type hints and a clear docstring
+in `agent/tools/`. Every brain sees it automatically.
 
 ### Tests
 
@@ -184,4 +243,4 @@ When asking Claude for help, send the text of the error and the last lines of `d
 .venv\Scripts\python -m pytest tests
 ```
 
-The tests simulate Gemini, so they need no API key or microphone.
+The tests simulate the AI, so they need no LM Studio, API key or microphone.

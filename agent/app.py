@@ -1,10 +1,14 @@
 """Starts everything and connects the pieces:
 
-    hotkeys / popup / tray  ->  App  ->  Agent (Gemini + tools)  ->  popup + voice
+    hotkeys / popup / tray  ->  App  ->  worker thread  ->  Agent (brains + tools)  ->  popup + voice
+
+All commands run one after another on a single worker thread, because Windows UI Automation
+(used for screen control) must stay on the thread where it was started.
 """
 
 import logging
 import os
+import queue
 import sys
 import threading
 
@@ -17,24 +21,32 @@ _mutex = None  # keeps the single-instance lock alive
 
 
 class App:
-    def __init__(self, settings: dict, api_key: str):
+    def __init__(self, settings: dict):
         from agent.agent import Agent
-        from agent.brain import Brain
+        from agent.brains import BrainRouter
         from agent.hotkeys import Hotkeys
         from agent.tooling import load_all_tools
+        from agent.tools import screen
+        from agent.transcriber import Transcriber
         from agent.ui import Popup, Tray
+        from agent.usage import Usage
         from agent.voice import Recorder, Speaker
 
         self.settings = settings
         self.stop = StopSwitch()
-        self._run_lock = threading.Lock()
+        self.jobs = queue.Queue()
+        self.working = False
 
         self.popup = Popup(self.stop, on_send=self.submit_text, on_mic=self.toggle_mic, on_stop=self.press_stop)
         notice = lambda text: self.popup.show("info", text)  # noqa: E731
         self.speaker = Speaker(rate=settings["speech_rate"], on_notice=notice)
         self.recorder = Recorder()
-        brain = Brain(api_key, settings["model"], on_status=self.popup.status, on_notice=notice)
-        self.agent = Agent(settings, brain, load_all_tools(), get_memory(), ui=self, stop=self.stop)
+        self.transcriber = Transcriber(config.get_key("GEMINI_API_KEY"), settings["voice_model"], on_notice=notice)
+        self.usage = Usage()
+        self.router = BrainRouter(settings, self.usage, on_status=self.popup.status, on_notice=notice)
+        self.agent = Agent(settings, self.router, load_all_tools(), get_memory(), ui=self, stop=self.stop)
+        screen.configure(settings, hide_popup=self.popup.hide_and_wait)
+        self._screen = screen
 
         self.tray = Tray(
             on_open=lambda: self.popup.show_window(focus=True),
@@ -43,13 +55,17 @@ class App:
             on_memory=lambda: _open_file(config.MEMORY_FILE, default="[]"),
             on_log=lambda: _open_file(config.ACTION_LOG_FILE),
             on_quit=self.quit,
+            get_mode=lambda: self.settings["brain_mode"],
+            set_mode=self.set_brain_mode,
+            cost_text=self.cost_text,
         )
         self.hotkeys = Hotkeys(settings, on_talk_start=self.start_listening, on_talk_end=self.finish_listening,
                                on_open_popup=lambda: self.popup.show_window(focus=True), on_stop=self.press_stop)
+        threading.Thread(target=self._worker, daemon=True, name="agent-worker").start()
 
         talk = settings["push_to_talk_hotkey"].upper()
         self.popup.show("info", f"Ready. Hold {talk} and speak, or type below. "
-                                f"Press {settings['stop_key'].upper()} to stop me. Model: {settings['model']}")
+                                f"Press {settings['stop_key'].upper()} to stop me. Brain: {self.mode_text()}")
         self.popup.show_window(focus=True)
 
     # ---------------------------------------------------- what the Agent calls (its "ui")
@@ -69,31 +85,52 @@ class App:
     # ---------------------------------------------------- commands
 
     def submit_text(self, text: str):
-        self._start_command(text=text)
+        self._queue_job(text=text)
 
-    def _start_command(self, text=None, audio=None):
-        if not self._run_lock.acquire(blocking=False):
+    def _queue_job(self, text=None, audio=None):
+        if self.working or not self.jobs.empty():
             self.popup.show("info", "Still working on the last command. Press Esc to stop it first.")
             return
         self.speaker.stop()
+        self.working = True
+        self.jobs.put((text, audio))
 
-        def work():
+    def _worker(self):
+        while True:
+            text, audio = self.jobs.get()
             self.tray.set_state("busy")
             try:
-                self.agent.handle(text=text, audio_wav=audio)
+                if audio is not None:
+                    text = self._transcribe(audio)
+                if text:
+                    self.agent.handle(text)
             except Exception as e:
                 log.exception("Command failed")
                 self.popup.show("error", f"Unexpected problem: {e} (details in data/agent.log)")
             finally:
+                self.working = False
                 self.tray.set_state("normal")
-                self._run_lock.release()
+                self.popup.status("Ready")
+                self.popup.show_window(focus=False)  # comes back after screen actions hid it
 
-        threading.Thread(target=work, daemon=True, name="agent").start()
+    def _transcribe(self, audio: bytes) -> str:
+        from agent.brains import BrainError
+        self.popup.status("Recognizing speech...")
+        try:
+            text = self.transcriber.transcribe(audio)
+        except BrainError as e:
+            self.popup.show("error", str(e))
+            return ""
+        if not text:
+            self.popup.show("info", "I didn't catch that. Try again, a bit closer to the microphone.")
+            return ""
+        self.popup.show("info", f"(voice) {text}")
+        return text
 
     # ---------------------------------------------------- voice
 
     def start_listening(self):
-        if self.agent.busy:
+        if self.working:
             self.popup.show("info", "Still working on the last command. Press Esc to stop it first.")
             return
         self.speaker.stop()
@@ -116,8 +153,7 @@ class App:
         if audio is None:
             self.popup.status("Too short - hold the keys while you speak")
             return
-        self.popup.status("Sending your voice...")
-        self._start_command(audio=audio)
+        self._queue_job(audio=audio)
 
     def toggle_mic(self):
         """The Mic button: click to start, click again to send."""
@@ -126,11 +162,35 @@ class App:
         else:
             self.start_listening()
 
+    # ---------------------------------------------------- brains and costs
+
+    def set_brain_mode(self, mode: str):
+        self.settings["brain_mode"] = mode
+        config.save_settings(self.settings)
+        self.popup.show("info", f"Brain: {self.mode_text()}")
+
+    def mode_text(self) -> str:
+        brains = self.router.brains
+        local = brains.get(self.settings["local_brain"])
+        cloud = brains.get(self.settings["cloud_brain"])
+        mode = self.settings["brain_mode"]
+        if mode == "local":
+            return local.label if local else "?"
+        if mode == "cloud":
+            return cloud.label if cloud else "?"
+        return f"auto ({local.label if local else '?'} -> {cloud.label if cloud else '?'})"
+
+    def cost_text(self) -> str:
+        spent = self.usage.month_cost()
+        return f"Cloud this month: ${spent:.2f} / ${float(self.settings['cloud_monthly_budget_usd']):.2f}"
+
     # ---------------------------------------------------- misc
 
     def press_stop(self):
+        if self._screen.sent_keys_recently():  # the agent itself pressed Esc inside an app
+            return
         self.speaker.stop()
-        if self.agent.busy:
+        if self.working:
             self.stop.press()
             self.popup.status("Stopping...")
 
@@ -160,6 +220,7 @@ def _setup_logging():
     config.ensure_data_dir()
     logging.basicConfig(filename=config.ERROR_LOG_FILE, level=logging.INFO, encoding="utf-8",
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     sys.excepthook = lambda *exc: log.error("Uncaught error", exc_info=exc)
     threading.excepthook = lambda args: log.error("Uncaught error in thread %s", args.thread,
                                                   exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
@@ -187,10 +248,16 @@ def _message_box(text: str, title: str = "Desktop Agent"):
 
 
 def _make_dpi_aware():
-    """Makes the popup sharp instead of blurry on high-resolution screens."""
+    """Use real screen pixels everywhere, so screenshots, element positions and clicks line up
+    (also on high-resolution and multi-monitor setups)."""
+    import ctypes
     try:
-        import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):  # per-monitor v2
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         pass
 
@@ -206,14 +273,14 @@ def main():
     _make_dpi_aware()
     try:
         settings = config.load_settings()
-        api_key = config.load_api_key()
+        config.load_env()
     except ValueError as e:
         _message_box(str(e))
         sys.exit(1)
     safety.set_extra_protected(settings["extra_protected_folders"])
-    log.info("Starting with model %s", settings["model"])
+    log.info("Starting; brain mode %s", settings["brain_mode"])
     try:
-        app = App(settings, api_key)
+        app = App(settings)
     except Exception as e:
         log.exception("Startup failed")
         _message_box(f"The agent could not start:\n\n{e}\n\nRun check_setup.bat to find the problem.")

@@ -1,4 +1,6 @@
-# Gemini (Google's official SDK)
+# AI brains: OpenAI-compatible API (LM Studio, Z.ai GLM, Qwen, DeepSeek, Gemini)
+openai>=1.50
+# Gemini, used for voice recognition
 google-genai>=2.31,<3
 python-dotenv>=1.0
 
@@ -14,6 +16,10 @@ pywin32>=306
 psutil>=5.9
 pyperclip>=1.8
 screen-brightness-control>=0.20
+
+# Screen control (Stage 2): screenshots and reading/clicking app elements
+mss>=9.0
+uiautomation>=2.0.20
 
 # Files: safe delete (Recycle Bin), PDF and Word reading
 send2trash>=1.8
