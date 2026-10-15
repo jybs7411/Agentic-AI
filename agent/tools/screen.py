@@ -13,9 +13,13 @@ Privacy: if a window whose title is in the screenshot blocklist is visible, no p
 
 import base64
 import io
+import re
 import threading
 import time
 
+from agent import clipboard
+from agent.safety import risky_word_in
+from agent.texts import say
 from agent.tooling import tool
 
 INTERACTIVE = {
@@ -26,13 +30,14 @@ INTERACTIVE = {
 READABLE = {"TextControl", "DocumentControl", "EditControl", "ListItemControl", "DataItemControl",
             "HyperlinkControl", "HeaderItemControl", "TreeItemControl", "TitleBarControl"}
 MARK_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#008080", "#9a6324", "#800000"]
-DANGEROUS_KEYS = {"alt+f4": "closes the window (unsaved work may be lost)",
-                  "shift+delete": "deletes permanently, skipping the Recycle Bin",
-                  "ctrl+shift+delete": "opens clearing of browser data"}
+DANGEROUS_KEYS = {"alt+f4": ("창을 닫아요 (저장하지 않은 작업이 사라질 수 있어요)", "closes the window (unsaved work may be lost)"),
+                  "shift+delete": ("휴지통을 거치지 않고 영구 삭제해요", "deletes permanently, skipping the Recycle Bin"),
+                  "ctrl+shift+delete": ("브라우저 데이터 삭제 창을 열어요", "opens clearing of browser data")}
 
 _state = {"elements": {}, "monitor": None, "target": None}
 _settings = {"screenshot_blocklist": [], "screenshot_max_width": 1280, "risky_click_words": [],
-             "messaging_apps": []}
+             "messaging_apps": [], "private_programs": []}
+SHELL_TITLES = ("run", "실행", "ausführen")
 _hooks = {"hide_popup": lambda: None}
 _thread = threading.local()
 _last_synthetic_keys = [0.0]
@@ -85,13 +90,43 @@ def _overlaps(rect, monitor) -> bool:
                 or rect[3] <= monitor["top"] or rect[1] >= monitor["top"] + monitor["height"])
 
 
+def _is_private_window(window: dict) -> bool:
+    title = window.get("title", "").lower()
+    program = window.get("program", "").lower()
+    return (any(x.lower() in title for x in _settings["screenshot_blocklist"])
+            or any(x.lower() in program for x in _settings["private_programs"]))
+
+
 def _blocked_title(monitor):
     from agent.tools.apps import _windows
-    words = [w.lower() for w in _settings["screenshot_blocklist"]]
     for w in _windows():
-        if not w["minimized"] and _overlaps(w["rect"], monitor) and any(x in w["title"].lower() for x in words):
+        if not w["minimized"] and _overlaps(w["rect"], monitor) and _is_private_window(w):
             return w["title"]
     return None
+
+
+def _cannot_control(target):
+    """An error for windows the agent can't or mustn't control, else None."""
+    from agent.tools.apps import is_elevated
+    if target is None:
+        return {"error": "No open window found."}
+    if _is_private_window(target):
+        return {"error": f"The front window '{target['title']}' is private (screenshot blocklist). "
+                         "Ask the user to do this part themselves."}
+    if is_elevated(target.get("pid", 0)):
+        return {"error": f"'{target['title']}' runs as administrator; Windows doesn't let other programs click "
+                         "or type in it. Ask the user to do this part themselves."}
+    return None
+
+
+def _is_shell(target) -> bool:
+    """Command windows, terminals and the Run box: typing there runs commands."""
+    from agent.tools.apps import SHELL_PROCESSES
+    if not target:
+        return False
+    program = target.get("program", "").lower()
+    title = target.get("title", "").strip().lower()
+    return program in SHELL_PROCESSES or (program == "explorer.exe" and title in SHELL_TITLES)
 
 
 def _is_messaging_app(program: str) -> bool:
@@ -104,10 +139,9 @@ def _is_messaging_app(program: str) -> bool:
 
 
 def _risky_name(name: str):
-    lowered = (name or "").lower()
-    for word in _settings["risky_click_words"]:
-        if word.lower() in lowered:
-            return f'Clicks "{name}" - this may send, delete, buy or submit something'
+    if risky_word_in(name, _settings["risky_click_words"]):
+        return say(f'"{name}"을(를) 눌러요. 전송·삭제·구매·제출이 될 수 있어요.',
+                   f'Clicks "{name}" - this may send, delete, buy or submit something')
     return None
 
 
@@ -212,18 +246,32 @@ def _press(keys: str):
 
 
 def _paste(text: str):
-    """Type text by pasting it: reliable for Korean/German characters and long text."""
-    import pyperclip
-    try:
-        previous = pyperclip.paste()
-    except Exception:
-        previous = None
-    pyperclip.copy(text)
+    """Type text by pasting it: reliable for Korean/German characters and long text. Whatever you had
+    copied (text, image, files) is put back afterwards."""
+    saved = clipboard.save()
+    clipboard.set_text(text)
     time.sleep(0.05)
     _press("ctrl+v")
     time.sleep(0.4)  # give the app time to read the clipboard before restoring it
-    if previous is not None:
-        pyperclip.copy(previous)
+    clipboard.restore(saved)
+
+
+def _after_action(result: dict, settle: float = 0.6) -> dict:
+    """Add the front window's new element list to a result, so the AI sees what changed without
+    spending a request on look_at_screen."""
+    time.sleep(settle)
+    try:
+        target = _target_window()
+        if target and not _cannot_control(target):
+            monitor = _monitor_for(target["rect"])
+            elements = _collect(target["id"], monitor, INTERACTIVE, limit=60, time_budget=2.0)
+            numbered = {i + 1: el for i, el in enumerate(elements)}
+            _state.update(elements=numbered, monitor=monitor, target=target)
+            result["window_now"] = target["title"]
+            result["elements_now"] = [_describe(n, el) for n, el in numbered.items()]
+    except Exception:
+        pass
+    return result
 
 
 def _click(x: int, y: int, button: str = "left", double: bool = False):
@@ -279,13 +327,10 @@ def look_at_screen(include_screenshot: bool = True) -> dict:
     """
     _hooks["hide_popup"]()
     target = _target_window()
-    if target is None:
-        return {"error": "No open window found."}
+    problem = _cannot_control(target)
+    if problem:
+        return problem
     monitor = _monitor_for(target["rect"])
-    words = [w.lower() for w in _settings["screenshot_blocklist"]]
-    if any(w in target["title"].lower() for w in words):
-        return {"error": f"The front window '{target['title']}' is private (screenshot blocklist). "
-                         "Ask the user to do this part themselves."}
     elements = _collect(target["id"], monitor, INTERACTIVE, limit=100)
     numbered = {i + 1: el for i, el in enumerate(elements)}
     _state.update(elements=numbered, monitor=monitor, target=target)
@@ -315,11 +360,11 @@ def read_screen_text(max_chars: int = 4000) -> dict:
     """
     _hooks["hide_popup"]()
     target = _target_window()
-    if target is None:
-        return {"error": "No open window found."}
-    words = [w.lower() for w in _settings["screenshot_blocklist"]]
-    if any(w in target["title"].lower() for w in words):
-        return {"error": f"The front window '{target['title']}' is private (screenshot blocklist)."}
+    problem = _cannot_control(target)
+    if problem:
+        return problem
+    from agent.safety import mark_private_data_read
+    mark_private_data_read()
     lines, previous = [], None
     for el in _collect(target["id"], None, READABLE, limit=600, time_budget=4.0):
         line = el["value"] if el["type"] in ("Edit", "Document") and el["value"] else el["name"]
@@ -353,12 +398,34 @@ def click_element(number: int, button: str = "left", double_click: bool = False)
     if el["name"] and el["name"] not in _name_at(x, y):
         return {"error": "The screen has changed since the last look. Call look_at_screen again."}
     _click(x, y, button, double_click)
-    time.sleep(0.5)
-    return {"clicked": f'{el["type"]} "{el["name"]}"'}
+    return _after_action({"clicked": f'{el["type"]} "{el["name"]}"'})
+
+
+def _match_by_name(name: str, element_type: str = ""):
+    """(target window, monitor, matches, exact?) for a visible name in the front window."""
+    target = _target_window()
+    if target is None or _cannot_control(target):
+        return target, None, [], False
+    monitor = _monitor_for(target["rect"])
+    elements = _collect(target["id"], monitor, INTERACTIVE, limit=300)
+    wanted = name.strip().casefold()
+    pool = [e for e in elements if not element_type or e["type"].lower() == element_type.lower()]
+    exact = [e for e in pool if e["name"].casefold() == wanted]
+    partial = [e for e in pool if wanted and wanted in e["name"].casefold()]
+    return target, monitor, exact or partial, bool(exact)
 
 
 def _risk_find_and_click(args):
-    return _risky_name(args.get("name", ""))
+    reason = _risky_name(args.get("name", ""))
+    if reason:
+        return reason
+    try:  # check the name of the element that will REALLY be clicked, not just the words asked for
+        _target, _monitor, matches, exact = _match_by_name(args.get("name", ""), args.get("element_type", ""))
+        if matches and (exact or len(matches) == 1):
+            return _risky_name(matches[0]["name"])
+    except Exception:
+        pass
+    return None
 
 
 @tool(risk=_risk_find_and_click)
@@ -371,16 +438,12 @@ def find_and_click(name: str, element_type: str = "") -> dict:
       element_type: Optional type filter, e.g. "Button", "MenuItem", "Hyperlink", "Edit", "TabItem".
     """
     _hooks["hide_popup"]()
-    target = _target_window()
-    if target is None:
-        return {"error": "No open window found."}
-    monitor = _monitor_for(target["rect"])
-    elements = _collect(target["id"], monitor, INTERACTIVE, limit=300)
-    wanted = name.strip().casefold()
-    pool = [e for e in elements if not element_type or e["type"].lower() == element_type.lower()]
-    exact = [e for e in pool if e["name"].casefold() == wanted]
-    partial = [e for e in pool if wanted in e["name"].casefold()]
-    matches = exact or partial
+    if not name.strip():
+        return {"error": "Give the visible name of what to click."}
+    target, monitor, matches, exact = _match_by_name(name, element_type)
+    problem = _cannot_control(target)
+    if problem:
+        return problem
     if not matches:
         return {"error": f'Nothing named "{name}" in "{target["title"]}". Try look_at_screen.'}
     if len(matches) > 1 and not exact:
@@ -391,8 +454,7 @@ def find_and_click(name: str, element_type: str = "") -> dict:
     el = matches[0]
     x, y = _center(el)
     _click(x, y)
-    time.sleep(0.5)
-    return {"clicked": f'{el["type"]} "{el["name"]}"'}
+    return _after_action({"clicked": f'{el["type"]} "{el["name"]}"'})
 
 
 def _risk_click_at(args):
@@ -431,17 +493,22 @@ def click_at(x_percent: float, y_percent: float, button: str = "left", double_cl
     _hooks["hide_popup"]()
     x, y = _percent_to_point(x_percent, y_percent)
     _click(x, y, button, double_click)
-    time.sleep(0.5)
-    return {"clicked_at_pixels": [x, y]}
+    return _after_action({"clicked_at_pixels": [x, y]})
+
+
+def _typing_risk(target, text: str, press_enter: bool):
+    if _is_shell(target):
+        return say(f"명령 창({target.get('program')})에 입력해요. 명령이 실행될 수 있어요:\n{text}",
+                   f"Types into a command window ({target.get('program')}); this can run commands:\n{text}")
+    if target and _is_messaging_app(target.get("program", "")) and (press_enter or "\n" in text):
+        return say(f"{target.get('program')}에서 입력 후 Enter를 눌러요. 메시지가 전송될 수 있어요.",
+                   f"Types and presses Enter in {target.get('program')} - this probably SENDS a message")
+    return None
 
 
 def _risk_typing(args):
-    if not args.get("press_enter"):
-        return None
-    target = _state.get("target") or {}
-    if _is_messaging_app(target.get("program", "")):
-        return f'Types and presses Enter in {target.get("program")} - this probably SENDS a message'
-    return None
+    return _typing_risk(_state.get("target") or _target_window(), str(args.get("text", "")),
+                        bool(args.get("press_enter")))
 
 
 @tool(risk=_risk_typing)
@@ -466,17 +533,11 @@ def type_into_element(number: int, text: str, press_enter: bool = False, replace
     _paste(text)
     if press_enter:
         _press("enter")
-        time.sleep(0.5)
-    return {"typed_into": f'{el["type"]} "{el["name"]}"', "chars": len(text)}
+    return _after_action({"typed_into": f'{el["type"]} "{el["name"]}"', "chars": len(text)})
 
 
 def _risk_type_text(args):
-    if not args.get("press_enter"):
-        return None
-    target = _target_window() or {}
-    if _is_messaging_app(target.get("program", "")):
-        return f'Types and presses Enter in {target.get("program")} - this probably SENDS a message'
-    return None
+    return _typing_risk(_target_window(), str(args.get("text", "")), bool(args.get("press_enter")))
 
 
 @tool(risk=_risk_type_text)
@@ -489,21 +550,29 @@ def type_text(text: str, press_enter: bool = False) -> dict:
     """
     _hooks["hide_popup"]()
     target = _focus_target()
+    problem = _cannot_control(target)
+    if problem:
+        return problem
     _paste(text)
     if press_enter:
         _press("enter")
-    return {"typed": len(text), "window": target["title"] if target else None}
+    return _after_action({"typed": len(text), "window": target["title"]})
 
 
 def _risk_keys(args):
     keys = args.get("keys", "").lower().replace(" ", "")
     for combo, why in DANGEROUS_KEYS.items():
         if combo in keys:
-            return f"Presses {combo}: {why}"
-    if keys.endswith("enter"):
-        target = _target_window() or {}
-        if _is_messaging_app(target.get("program", "")):
-            return f'Presses Enter in {target.get("program")} - this probably SENDS a message'
+            return say(f"{combo} 키를 눌러요: {why[0]}", f"Presses {combo}: {why[1]}")
+    if re.search(r"(^|[+,])(win|windows|left windows|right windows|cmd|super)([+,]|$)", keys):
+        return say(f"Windows 키 조합을 눌러요 ({keys}). 프로그램이 실행되거나 설정이 바뀔 수 있어요.",
+                   f"Presses a Windows-key shortcut ({keys}); it can start programs or change settings")
+    target = _target_window()
+    if "enter" in keys and _is_shell(target):
+        return say("명령 창에서 Enter를 눌러요. 입력된 명령이 실행돼요.", "Presses Enter in a command window: runs the command")
+    if keys.endswith("enter") and target and _is_messaging_app(target.get("program", "")):
+        return say(f"{target.get('program')}에서 Enter를 눌러요. 메시지가 전송될 수 있어요.",
+                   f'Presses Enter in {target.get("program")} - this probably SENDS a message')
     return None
 
 
@@ -517,12 +586,14 @@ def press_keys(keys: str) -> dict:
     """
     _hooks["hide_popup"]()
     target = _focus_target()
+    problem = _cannot_control(target)
+    if problem:
+        return problem
     try:
         _press(keys)
     except ValueError as e:
         return {"error": f"Unknown key name: {e}"}
-    time.sleep(0.3)
-    return {"pressed": keys, "window": target["title"] if target else None}
+    return _after_action({"pressed": keys, "window": target["title"]}, settle=0.5)
 
 
 @tool()

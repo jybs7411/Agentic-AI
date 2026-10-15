@@ -15,6 +15,7 @@ from agent.safety import ActionLog, StopSwitch, is_protected
 from agent.tooling import load_all_tools
 from agent.tools import screen
 from agent.usage import Usage
+from agent.texts import t
 from agent.voice import clean_for_speech, detect_language
 
 TOOLS = load_all_tools()
@@ -147,7 +148,7 @@ class FakeUI:
     def status(self, text):
         pass
 
-    def confirm(self, reason, described):
+    def confirm(self, reason, described, title=None, yes_text=None, timeout=None):
         self.confirms.append(reason)
         return self.approve
 
@@ -254,7 +255,7 @@ def test_system_prompt_is_stable_and_time_goes_in_user_message(tmp_path):
 
 
 def test_plan_text_is_shown_but_only_final_answer_is_spoken(tmp_path):
-    brain = FakeBrain([("Plan: check folders.", [call("get_known_folders")]), ("Done.", [])])
+    brain = FakeBrain([("Plan: check folders.", [call("list_folder", path=str(tmp_path))]), ("Done.", [])])
     ui = FakeUI()
     make_agent(FakeRouter(brain), ui, tmp_path).handle("show my folders")
     assert ("agent", "Plan: check folders.") in ui.lines
@@ -267,7 +268,7 @@ def test_falls_back_to_cloud_when_local_is_off(tmp_path):
     ui = FakeUI()
     make_agent(FakeRouter(local, cloud), ui, tmp_path).handle("hi")
     assert ui.spoken == ["클라우드가 답했어요."]
-    assert any("Switching to cloud" in text for kind, text in ui.lines)
+    assert any("cloud" in text for kind, text in ui.lines if kind == "info")
 
 
 def test_reports_all_reasons_when_no_brain_works(tmp_path):
@@ -317,7 +318,7 @@ def test_stop_switch_interrupts(tmp_path):
     ui = FakeUI()
     agent = make_agent(FakeRouter(StoppingBrain([])), ui, tmp_path)
     agent.handle("do something long")
-    assert ("info", "Stopped.") in ui.lines and not agent.busy
+    assert ("info", t("stopped")) in ui.lines and not agent.busy
 
 
 # ---------------------------------------------------------------- brains, budget, settings
@@ -327,7 +328,7 @@ def test_paid_brain_refuses_when_budget_is_used_up():
     usage.record("glm", 10_000_000, 0, 0.3, 0.9)  # $3.00
     profile = dict(config.DEFAULT_BRAINS["glm"], api_key_env="")
     brain = Brain("glm", profile, usage, budget_ok=lambda: usage.month_cost() < 2.0)
-    with pytest.raises(BrainUnavailable, match="budget"):
+    with pytest.raises(BrainUnavailable, match="예산|budget"):
         brain.chat([{"role": "user", "content": "hi"}], [], StopSwitch())
     assert usage.month_cost() == pytest.approx(3.0)
 
@@ -336,7 +337,7 @@ def test_missing_key_makes_brain_unavailable(monkeypatch):
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
     monkeypatch.setattr(config, "load_env", lambda: None)
     brain = Brain("glm", config.DEFAULT_BRAINS["glm"])
-    with pytest.raises(BrainUnavailable, match="ZAI_API_KEY"):
+    with pytest.raises(BrainUnavailable, match="API"):
         brain.chat([], [], StopSwitch())
 
 
@@ -385,7 +386,7 @@ def test_old_long_tool_results_are_shortened():
     turn = [{"role": "user", "content": "q"}] + [{"role": "tool", "tool_call_id": str(i), "content": "x" * 5000}
                                                 for i in range(5)]
     out = _shorten_old_results(turn)
-    assert [len(m["content"]) < 2000 for m in out[1:]] == [True, True, False, False, False]
+    assert [len(m["content"]) < 2000 for m in out[1:]] == [True, True, True, False, False]
     assert turn[1]["content"] == "x" * 5000  # original untouched
 
 
@@ -397,8 +398,8 @@ def test_spreadsheet_numbers_and_leading_zeros(tmp_path):
 
 
 def test_smart_main_ai_is_not_replaced_when_a_tool_fails(tmp_path):
-    bad = call("read_file", path=str(tmp_path / "missing.txt"))
-    main = FakeBrain([("", [bad]), ("", [bad]), ("", [bad]), ("That file doesn't exist.", [])], label="gemini")
+    bad = [call("read_file", path=str(tmp_path / f"missing{i}.txt")) for i in range(3)]
+    main = FakeBrain([("", [bad[0]]), ("", [bad[1]]), ("", [bad[2]]), ("That file doesn't exist.", [])], label="gemini")
     backup = FakeBrain([], label="backup")
     ui = FakeUI()
     make_agent(FakeRouter(main, backup), ui, tmp_path).handle("read it")

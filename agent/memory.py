@@ -17,14 +17,31 @@ class Memory:
         self._lock = threading.Lock()
 
     def _load(self) -> list:
+        """Read the file, accepting hand-edited shapes: plain strings, missing numbers, a wrapper object."""
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
         except Exception:
             return []
+        if isinstance(data, dict):
+            data = data.get("facts", [])
+        facts, used = [], set()
+        for item in data if isinstance(data, list) else []:
+            if isinstance(item, str):
+                item = {"fact": item}
+            if not isinstance(item, dict) or not str(item.get("fact", "")).strip():
+                continue
+            fact_id = item.get("id")
+            if not isinstance(fact_id, int) or fact_id in used:
+                fact_id = max(used | {0}) + 1
+            used.add(fact_id)
+            facts.append({"id": fact_id, "fact": str(item["fact"]).strip(), "saved": str(item.get("saved", ""))})
+        return facts
 
     def _save(self, facts: list):
         self.path.parent.mkdir(exist_ok=True)
-        self.path.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
 
     def all(self) -> list:
         with self._lock:
@@ -50,7 +67,7 @@ class Memory:
         facts = self.all()
         if not facts:
             return "(nothing saved yet)"
-        return "\n".join(f"- [{f['id']}] {f['fact']}" for f in facts)
+        return "\n".join(f"- [{f['id']}] {f['fact'][:300]}" for f in facts)
 
 
 _instance = None

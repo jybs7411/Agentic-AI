@@ -88,6 +88,11 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
 
 
+def site_tmp():
+    import tempfile
+    return tempfile.mkdtemp()
+
+
 def ref(page_text: str, label: str) -> int:
     match = re.search(r"\[(\d+)\] [^\n\[]*\"" + re.escape(label), page_text)
     assert match, f"no element for {label}"
@@ -107,7 +112,8 @@ def test_risky_web_actions_ask_first(site):
     assert TOOLS["web_click"].risk_reason({"number": ref(page, "주문하기")})
     assert TOOLS["web_click"].risk_reason({"number": ref(page, "로그인")})
     assert TOOLS["web_click"].risk_reason({"number": ref(page, "검색")}) is None
-    assert TOOLS["web_download"].risk_reason({"number": ref(page, "설치 파일")})
+    result = TOOLS["web_download"].call({"number": ref(page, "설치 파일"), "folder": str(site_tmp())})
+    assert "program" in result["error"]  # programs are refused unless the user agreed (allow_program)
 
 
 def test_password_is_never_typed(site):
@@ -143,15 +149,55 @@ def test_blocked_site_and_captcha(site):
 
 def test_watch_reports_only_new_lines(site):
     number = TOOLS["watch_page"].call({"url": site + "/news", "interval_minutes": 5})["number"]
-    assert web.check_watch(number) is None
+    assert web.check_watch(number) == {}
     NEWS.append("세 번째 공지")
-    assert "세 번째 공지" in web.check_watch(number)
-    assert web.check_watch(number) is None
+    assert "세 번째 공지" in web.check_watch(number)["new"]
+    assert web.check_watch(number) == {}
+    NEWS.append("방문자 1234명")
+    web.check_watch(number)
+    NEWS[-1] = "방문자 1235명"  # only a number changed: not news
+    assert web.check_watch(number) == {}
+
+
+def test_unreachable_watch_reports_an_error_and_waits(site):
+    number = TOOLS["watch_page"].call({"url": "http://127.0.0.1:9/nothing", "interval_minutes": 5})["number"]
+    result = web.check_watch(number)
+    assert "error" in result
+    assert number not in web.due_watches()  # not retried every minute
 
 
 def test_labels_for_routines(site):
     page = TOOLS["web_open"].call({"url": site + "/"})["page"]
     number = ref(page, "새 탭으로 보기")
-    assert web.label_of_ref(number) == "새 탭으로 보기"
+    assert web.label_of_ref(number) == ["새 탭으로 보기", 1]
     assert web.find_ref("새 탭으로 보기") == number
     assert web.find_ref("없는 링크") is None
+
+
+def test_blocked_site_reached_by_link_is_refused_everywhere(site):
+    TOOLS["web_open"].call({"url": site + "/"})
+    web._settings["web_blocked_sites"].append("127.0.0.1")
+    try:
+        assert "blocked" in TOOLS["web_read"].call({})["error"]
+        assert "blocked" in TOOLS["web_get_tables"].call({})["error"]
+        assert "blocked" in TOOLS["web_click"].call({"number": 1})["error"]
+    finally:
+        web._settings["web_blocked_sites"].remove("127.0.0.1")
+
+
+def test_frames_are_read(site):
+    page = web._page()
+    page.set_content(f'<h1>Blog</h1><iframe src="{site}/" width="800" height="600"></iframe>')
+    page.wait_for_load_state("load")
+    view = web._snapshot()
+    assert "# Blog" in view["page"] and "오늘의 특가" in view["page"]  # the post lives in the frame
+    number = ref(view["page"], "여기")
+    assert web._ref(number) is not None
+
+
+def test_secret_fields_are_never_typed(site):
+    page = web._page()
+    page.set_content('<form><input name="otp" placeholder="인증번호"><input name="acct" aria-label="계좌번호"></form>')
+    view = web._snapshot()
+    for label in ("인증번호", "계좌번호"):
+        assert "error" in TOOLS["web_type"].call({"number": ref(view["page"], label), "text": "123"})

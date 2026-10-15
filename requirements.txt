@@ -1,8 +1,10 @@
 # AI brains: OpenAI-compatible API (LM Studio, Z.ai GLM, Qwen, DeepSeek, Gemini)
-openai>=1.50
+openai>=1.50,<4
 # Gemini, used for voice recognition
 google-genai>=2.31,<3
 python-dotenv>=1.0
+# Time zones (Gemini's daily limit resets at midnight Pacific time)
+tzdata>=2024.1
 
 # Hotkeys, microphone, tray icon
 keyboard>=0.13.5

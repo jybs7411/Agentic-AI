@@ -78,13 +78,13 @@ def test_daily_limit_switches_to_another_model(server_url):
     brain = gemini_like(server_url)
     assert brain.chat(USER, [], StopSwitch()).text == "from another model"
     assert [r["model"] for r in RECEIVED] == ["gemini-flash-latest", "gemini-3.6-flash"]
-    assert any("switching to gemini-3.6-flash" in n for n in NOTICES)
+    assert any("gemini-3.6-flash" in n for n in NOTICES)
 
 
 def test_all_models_limited_means_unavailable(server_url):
     limit = (429, {"error": {"message": "Quota exceeded per day"}})
     SCRIPT.extend([limit] * 4)
-    with pytest.raises(BrainUnavailable, match="limit"):
+    with pytest.raises(BrainUnavailable, match="사용량|limit"):
         gemini_like(server_url).chat(USER, [], StopSwitch())
     assert len(RECEIVED) == 3  # flash-latest, 3.6-flash, 3.6-flash-lite (image model skipped)
 
@@ -95,14 +95,70 @@ def test_per_minute_limit_waits_when_no_other_model(server_url):
     assert brain.chat(USER, [], StopSwitch()).text == "after waiting"
 
 
+def test_tool_calls_from_another_model_get_the_placeholder_signature(server_url):
+    SCRIPT.extend([ok("fine")])
+    history = USER + [{"role": "assistant", "content": None, "_model": "glm-4.6v", "tool_calls": [
+        {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "{}"}]
+    assert gemini_like(server_url).chat(history, [], StopSwitch()).text == "fine"
+    sent = RECEIVED[0]["messages"][1]
+    assert sent["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "skip_thought_signature_validator"
+    assert "_model" not in sent  # internal bookkeeping is never sent
+
+
+def test_own_signatures_are_kept(server_url):
+    SCRIPT.extend([ok("fine")])
+    history = USER + [{"role": "assistant", "content": None, "_model": "gemini-flash-latest", "tool_calls": [
+        {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{}"},
+         "extra_content": {"google": {"thought_signature": "REAL"}}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "{}"}]
+    gemini_like(server_url).chat(history, [], StopSwitch())
+    assert RECEIVED[0]["messages"][1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "REAL"
+
+
 def test_signature_error_is_retried_with_placeholder(server_url):
     SCRIPT.extend([(400, {"error": {"message": "Function call is missing a thought_signature"}}), ok("fine")])
-    history = USER + [{"role": "assistant", "content": None, "tool_calls": [
+    history = USER + [{"role": "assistant", "content": None, "_model": "gemini-flash-latest", "tool_calls": [
         {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
         {"role": "tool", "tool_call_id": "a", "content": "{}"}]
     assert gemini_like(server_url).chat(history, [], StopSwitch()).text == "fine"
     retried = RECEIVED[1]["messages"][1]["tool_calls"][0]
     assert retried["extra_content"]["google"]["thought_signature"] == "skip_thought_signature_validator"
+
+
+def test_reasoning_effort_is_sent_and_dropped_if_refused(server_url):
+    SCRIPT.extend([(400, {"error": {"message": "reasoning_effort is not supported for this model"}}), ok("fine")])
+    brain = gemini_like(server_url, reasoning_effort="low")
+    assert brain.chat(USER, [], StopSwitch()).text == "fine"
+    assert RECEIVED[0]["reasoning_effort"] == "low" and "reasoning_effort" not in RECEIVED[1]
+
+
+def test_empty_answer_is_retried_once(server_url):
+    SCRIPT.extend([ok(""), ok("now with an answer")])
+    assert gemini_like(server_url).chat(USER, [], StopSwitch()).text == "now with an answer"
+    assert RECEIVED[1]["messages"][-1]["content"].startswith("Continue")
+
+
+def test_no_request_is_wasted_when_every_model_is_limited(server_url):
+    brain = gemini_like(server_url, auto_switch_models=False)
+    brain._cooldown[brain.model] = __import__("time").time() + 3600
+    with pytest.raises(BrainUnavailable):
+        brain.chat(USER, [], StopSwitch())
+    assert RECEIVED == []
+
+
+def test_esc_interrupts_a_slow_request(server_url, monkeypatch):
+    import time as _time
+    from agent.safety import StopRequested
+    brain = gemini_like(server_url)
+    stop = StopSwitch()
+    monkeypatch.setattr(brain.client.chat.completions, "create", lambda **kw: _time.sleep(5))
+    import threading
+    threading.Timer(0.3, stop.press).start()
+    started = _time.time()
+    with pytest.raises(StopRequested):
+        brain.chat(USER, [], stop)
+    assert _time.time() - started < 2
 
 
 def test_preferred_model_comes_back_after_cooldown(server_url):

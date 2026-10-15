@@ -74,6 +74,8 @@ class Tool:
 
 def _json_schema(annotation) -> dict:
     origin = typing.get_origin(annotation)
+    if origin is typing.Literal:  # a fixed set of choices becomes an enum the AI must pick from
+        return {"type": "string", "enum": [str(v) for v in typing.get_args(annotation)]}
     if origin in (list, typing.List):
         (item,) = typing.get_args(annotation) or (str,)
         return {"type": "array", "items": _json_schema(item)}
@@ -92,7 +94,7 @@ def _coerce_value(value, annotation):
             return str(value)
         if typing.get_origin(annotation) is list and isinstance(value, str):
             return [value]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         pass
     return value
 

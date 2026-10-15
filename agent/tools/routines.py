@@ -16,11 +16,16 @@ import re
 from datetime import datetime, timedelta
 
 from agent import config
+from agent.texts import say
 from agent.tooling import tool
 
-DAY_NAMES = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
-             "월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6,
-             "mo": 0, "di": 1, "mi": 2, "do": 3, "fr": 4, "sa": 5, "so": 6}
+_DAY_WORDS = [
+    ("mon", "monday", "mo", "montag", "월", "월요일"), ("tue", "tuesday", "di", "dienstag", "화", "화요일"),
+    ("wed", "wednesday", "mi", "mittwoch", "수", "수요일"), ("thu", "thursday", "do", "donnerstag", "목", "목요일"),
+    ("fri", "friday", "fr", "freitag", "금", "금요일"), ("sat", "saturday", "sa", "samstag", "토", "토요일"),
+    ("sun", "sunday", "so", "sonntag", "일", "일요일"),
+]
+DAY_NAMES = {word: index for index, words in enumerate(_DAY_WORDS) for word in words}
 DAY_GROUPS = {"daily": list(range(7)), "매일": list(range(7)), "everyday": list(range(7)), "täglich": list(range(7)),
               "weekdays": [0, 1, 2, 3, 4], "평일": [0, 1, 2, 3, 4], "werktags": [0, 1, 2, 3, 4],
               "weekends": [5, 6], "주말": [5, 6], "wochenende": [5, 6]}
@@ -32,7 +37,7 @@ NOT_RECORDED = {
     "file_info", "read_file", "get_known_folders", "list_windows", "list_installed_apps", "get_system_info",
     "get_clipboard", "list_watches", "remember", "forget", "get_selected_text", "show_style_guide",
     "save_style_guide", "save_routine", "record_routine", "run_routine", "list_routines", "delete_routine",
-    "set_routine_schedule", "undo_last_moves",
+    "set_routine_schedule", "undo_last_moves", "web_ask_user",
 }
 
 _hooks = {"last_task": lambda: None, "replay": lambda actions: {"error": "Replay is not available."}}
@@ -61,12 +66,15 @@ def _save(routines: list):
     _file().write_text(json.dumps(routines, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def _find(routines: list, name: str):
-    wanted = name.strip().casefold()
-    exact = [r for r in routines if r["name"].casefold() == wanted]
-    if exact:
-        return exact[0]
-    partial = [r for r in routines if wanted in r["name"].casefold() or r["name"].casefold() in wanted]
+def _find(routines: list, name: str, exact_only: bool = False):
+    """The routine with this name. A part of a name also works, but only when it fits exactly one."""
+    wanted = " ".join(str(name).split()).casefold()
+    if not wanted:
+        return None
+    exact = [r for r in routines if " ".join(r["name"].split()).casefold() == wanted]
+    if exact or exact_only:
+        return exact[0] if exact else None
+    partial = [r for r in routines if wanted in r["name"].casefold()]
     return partial[0] if len(partial) == 1 else None
 
 
@@ -80,23 +88,37 @@ def parse_schedule(time_text: str, days_text: str):
     hour, minute = int(match.group(1)), int(match.group(2) or 0)
     if hour > 23 or minute > 59:
         raise ValueError(f"Invalid time '{time_text}'.")
+    return {"time": f"{hour:02d}:{minute:02d}", "days": parse_days(days_text)}
+
+
+def parse_days(days_text: str) -> list:
+    """"평일" / "mon-fri" / "월~금" / "월,수,금" / "월수금" / "Mo,Mi,Fr" -> [0, 1, ...]. Unknown words are errors."""
     key = (days_text or "daily").strip().lower()
     if key in DAY_GROUPS:
-        days = DAY_GROUPS[key]
-    else:
-        parts = [p for p in re.split(r"[,\s/]+|(?<=[월화수목금토일])", key) if p]
-        days = sorted({_day(p) for p in parts} - {None})
-        if not days:
-            raise ValueError(f"Unknown days '{days_text}'. Use daily, weekdays, weekends or e.g. mon,wed,fri.")
-    return {"time": f"{hour:02d}:{minute:02d}", "days": days}
+        return DAY_GROUPS[key]
+    key = re.sub(r"\s*(~|–|—|-|\bto\b|\bthru\b|\bthrough\b|\bbis\b)\s*", "-", key)
+    key = re.sub(r"(?<=[월화수목금토일])(?=[월화수목금토일])", ",", key)  # "월수금" -> "월,수,금"
+    days = set()
+    for token in [t for t in re.split(r"[,\s/]+", key) if t]:
+        ends = token.split("-")
+        if len(ends) == 2 and all(ends):
+            first, last = _day(ends[0]), _day(ends[1])
+            if first is None or last is None:
+                raise ValueError(f"Unknown day range '{token}'.")
+            days.update(range(first, last + 1) if first <= last else list(range(first, 7)) + list(range(0, last + 1)))
+            continue
+        day = _day(token)
+        if day is None:
+            raise ValueError(f"Unknown day '{token}'. Use daily, weekdays, weekends or e.g. mon,wed,fri / 월,수,금.")
+        days.add(day)
+    if not days:
+        raise ValueError(f"Unknown days '{days_text}'.")
+    return sorted(days)
 
 
 def _day(text: str):
-    """'mon' / 'Montag' / 'mo' / '월' / '월요일' -> 0"""
-    for length in (3, 2, 1):
-        if text[:length] in DAY_NAMES:
-            return DAY_NAMES[text[:length]]
-    return None
+    """A whole day word -> 0..6 ('mon', 'Monday', 'Montag', 'mo', '월', '월요일'), else None."""
+    return DAY_NAMES.get(text.strip().lower().rstrip("."))
 
 
 def _describe_schedule(schedule) -> str:
@@ -110,23 +132,39 @@ def _describe_schedule(schedule) -> str:
 
 
 def due_routines(now: datetime = None) -> list:
-    """Names of scheduled routines that should run now."""
+    """Scheduled runs due now: [{"name", "slot"}]. A slot is the planned date+time, so a manual run
+    earlier that day doesn't cancel it, and 23:55 still runs if checked just after midnight."""
     now = now or datetime.now()
     due = []
     for r in load_routines():
         schedule = r.get("schedule")
-        if not schedule or now.weekday() not in schedule["days"]:
+        if not isinstance(schedule, dict):
             continue
-        hour, minute = map(int, schedule["time"].split(":"))
-        planned = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if planned <= now <= planned + LATE_LIMIT and r.get("last_run", "")[:10] != now.strftime("%Y-%m-%d"):
-            due.append(r["name"])
+        try:
+            hour, minute = map(int, schedule["time"].split(":"))
+        except (KeyError, ValueError, AttributeError):
+            continue
+        for day_offset in (0, -1):
+            planned = (now + timedelta(days=day_offset)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+            slot = planned.isoformat(timespec="minutes")
+            if (planned.weekday() in schedule.get("days", []) and planned <= now <= planned + LATE_LIMIT
+                    and str(r.get("last_scheduled") or "") != slot):
+                due.append({"name": r["name"], "slot": slot})
+                break
     return due
+
+
+def mark_scheduled(name: str, slot: str):
+    routines = load_routines()
+    routine = _find(routines, name, exact_only=True)
+    if routine:
+        routine["last_scheduled"] = slot
+        _save(routines)
 
 
 def mark_ran(name: str):
     routines = load_routines()
-    routine = _find(routines, name)
+    routine = _find(routines, name, exact_only=True)
     if routine:
         routine["last_run"] = datetime.now().isoformat(timespec="minutes")
         _save(routines)
@@ -141,7 +179,22 @@ def _upsert(routine: dict) -> dict:
 
 # ---------------------------------------------------------------------- tools
 
-@tool()
+def _risk_save_routine(args):
+    steps = "\n".join(f"- {step}" for step in args.get("steps", []))
+    when = f"{args.get('time')} ({args.get('days') or 'daily'})" if args.get("time") else say("요청할 때만", "on request")
+    return say(f"루틴 '{args.get('name')}'을(를) 저장해요. 실행: {when}\n{steps}",
+               f"Saves the routine '{args.get('name')}'. Runs: {when}\n{steps}")
+
+
+def _risk_record_routine(args):
+    last = _hooks["last_task"]() or {}
+    steps = "\n".join(f"- {_action_text(a)}" for a in last.get("actions", []) if a["tool"] not in NOT_RECORDED)
+    when = f"{args.get('time')} ({args.get('days') or 'daily'})" if args.get("time") else say("요청할 때만", "on request")
+    return say(f"방금 한 작업을 루틴 '{args.get('name')}'(으)로 저장해요. 실행: {when}\n{steps}",
+               f"Saves the previous task as routine '{args.get('name')}'. Runs: {when}\n{steps}")
+
+
+@tool(risk=_risk_save_routine)
 def save_routine(name: str, steps: list[str], time: str = "", days: str = "daily") -> dict:
     """Save a routine described in words, e.g. "아침 루틴": ["오늘 날씨 알려주기", "네이버 뉴스 헤드라인 5개 요약",
     "메일함 열기"]. Each run, you carry out the steps. Optionally runs on a schedule.
@@ -161,7 +214,7 @@ def save_routine(name: str, steps: list[str], time: str = "", days: str = "daily
     return {"saved": name, "type": "steps", "runs": _describe_schedule(schedule)}
 
 
-@tool()
+@tool(risk=_risk_record_routine)
 def record_routine(name: str, time: str = "", days: str = "daily") -> dict:
     """Save the actions of the PREVIOUS finished command as a routine that can be replayed quickly
     (e.g. after "방금 한 거 '출근 준비'로 저장해줘"). Best for fixed actions: opening apps and sites,
@@ -208,7 +261,8 @@ def run_routine(name: str) -> dict:
     mark_ran(routine["name"])
     if routine["type"] == "steps":
         return {"routine": routine["name"], "steps": routine["steps"],
-                "instruction": "Carry out these steps now, in order, then give one short summary."}
+                "instruction": "These steps were saved and approved by the user earlier. Carry them out now, "
+                               "in order, then give one short summary."}
     result = _hooks["replay"](routine["actions"])
     result["routine"] = routine["name"]
     if result.get("declined"):
@@ -229,7 +283,8 @@ def list_routines() -> dict:
                          for r in load_routines()]}
 
 
-@tool()
+@tool(risk=lambda a: say(f"루틴 '{a.get('name')}'의 실행 시간을 바꿔요: {a.get('time') or '요청할 때만'} {a.get('days') or ''}",
+                         f"Changes when '{a.get('name')}' runs: {a.get('time') or 'on request'} {a.get('days') or ''}"))
 def set_routine_schedule(name: str, time: str = "", days: str = "daily") -> dict:
     """Change when a routine runs automatically, or remove its schedule (empty time).
 
@@ -250,7 +305,7 @@ def set_routine_schedule(name: str, time: str = "", days: str = "daily") -> dict
     return {"routine": routine["name"], "runs": _describe_schedule(routine["schedule"])}
 
 
-@tool()
+@tool(risk=lambda a: say(f"루틴 '{a.get('name')}'을(를) 지워요.", f"Deletes the routine '{a.get('name')}'."))
 def delete_routine(name: str) -> dict:
     """Delete a saved routine.
 
@@ -258,8 +313,8 @@ def delete_routine(name: str) -> dict:
       name: The routine's name.
     """
     routines = load_routines()
-    routine = _find(routines, name)
+    routine = _find(routines, name, exact_only=True)
     if routine is None:
-        return {"error": f"No routine named '{name}'."}
+        return {"error": f"No routine named exactly '{name}'.", "routines": [r["name"] for r in routines]}
     _save([r for r in routines if r is not routine])
     return {"deleted": routine["name"]}

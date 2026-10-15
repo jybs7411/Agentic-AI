@@ -5,12 +5,26 @@ echo.
 echo === Installing Desktop Agent ===
 echo.
 
+echo %~dp0 | findstr /i /c:"\Temp\" /c:"\AppData\Local\Temp" >nul
+if %errorlevel%==0 (
+  echo It looks like you opened this from inside a ZIP file.
+  echo Right-click the ZIP, choose "Extract All", then run install.bat from the extracted folder.
+  pause
+  exit /b 1
+)
+
 where py >nul 2>nul
 if %errorlevel%==0 (set "PY=py -3") else (set "PY=python")
 %PY% --version >nul 2>nul
 if errorlevel 1 (
   echo Python was not found. Install it from https://www.python.org/downloads/
   echo and tick "Add python.exe to PATH" during installation.
+  pause
+  exit /b 1
+)
+%PY% -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"
+if errorlevel 1 (
+  echo Your Python is too old. Install Python 3.10 or newer from https://www.python.org/downloads/
   pause
   exit /b 1
 )
@@ -36,14 +50,6 @@ if errorlevel 1 (
 )
 
 if not exist .env copy .env.example .env >nul
-findstr /c:"paste-your-key-here" .env >nul
-if %errorlevel%==0 (
-  echo.
-  echo Notepad will open the .env file. Paste your Gemini API key after GEMINI_API_KEY=
-  echo then save the file ^(Ctrl+S^) and close Notepad to continue.
-  notepad .env
-)
-
+.venv\Scripts\python.exe -m agent.setup_finish
 echo.
-.venv\Scripts\python.exe -m agent.check
 pause

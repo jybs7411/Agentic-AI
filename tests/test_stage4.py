@@ -117,12 +117,32 @@ def test_steps_routine_and_schedule():
     result = TOOLS["run_routine"].call({"name": "아침"})
     assert result["steps"] == ["날씨 알려주기", "뉴스 요약"] and "instruction" in result
     monday_9_05 = datetime(2026, 10, 19, 9, 5)
-    routines._save([dict(r, last_run="") for r in routines.load_routines()])
-    assert routines.due_routines(monday_9_05) == ["아침 루틴"]
+    due = routines.due_routines(monday_9_05)
+    assert due == [{"name": "아침 루틴", "slot": "2026-10-19T09:00"}]  # running it by hand didn't cancel it
     assert routines.due_routines(datetime(2026, 10, 19, 9, 30)) == []    # more than 15 minutes late
     assert routines.due_routines(datetime(2026, 10, 18, 9, 5)) == []     # Sunday
-    routines.mark_ran("아침 루틴")
-    assert routines.due_routines(datetime.now().replace(hour=9, minute=5)) == []  # already ran today
+    routines.mark_scheduled("아침 루틴", due[0]["slot"])
+    assert routines.due_routines(monday_9_05) == []                     # this slot already ran
+
+
+def test_schedule_just_before_midnight_still_runs_after_midnight():
+    TOOLS["save_routine"].call({"name": "마감", "steps": ["정리"], "time": "23:55", "days": "월"})
+    tuesday_00_05 = datetime(2026, 10, 20, 0, 5)
+    assert routines.due_routines(tuesday_00_05) == [{"name": "마감", "slot": "2026-10-19T23:55"}]
+
+
+def test_day_ranges_and_unknown_words():
+    assert routines.parse_days("mon-fri") == routines.parse_days("월~금") == [0, 1, 2, 3, 4]
+    assert routines.parse_days("월수금") == [0, 2, 4]
+    with pytest.raises(ValueError):
+        routines.parse_days("someday")
+
+
+def test_routine_names_must_match_exactly_to_delete():
+    TOOLS["save_routine"].call({"name": "아침 루틴", "steps": ["a"]})
+    assert "error" in TOOLS["delete_routine"].call({"name": "주말 아침 루틴"})
+    assert "error" in TOOLS["delete_routine"].call({"name": ""})
+    assert TOOLS["delete_routine"].call({"name": "아침 루틴"})["deleted"] == "아침 루틴"
 
 
 def test_record_and_replay_a_routine(tmp_path, monkeypatch):
@@ -170,12 +190,22 @@ def test_failed_replay_step_hands_the_goal_to_the_ai(tmp_path):
 
 
 def test_recorded_clicks_are_found_again_by_name(monkeypatch):
+    monkeypatch.setattr("agent.tools.screen._target_window", lambda: {"program": "notepad.exe"})
     assert resolve_action({"tool": "click_element", "args": {"number": 7}, "label": "저장"}) == \
         [("find_and_click", {"name": "저장"})]
+    with pytest.raises(LookupError):  # a different program is in front now
+        resolve_action({"tool": "click_element", "args": {"number": 7}, "label": "저장", "program": "winword.exe"})
+    with pytest.raises(LookupError):  # unnamed elements can't be found again
+        resolve_action({"tool": "click_element", "args": {"number": 7}, "label": None})
     steps = resolve_action({"tool": "type_into_element", "args": {"number": 3, "text": "안녕"}, "label": "제목"})
     assert [s[0] for s in steps] == ["find_and_click", "press_keys", "type_text"]
     from agent.tools import web
-    monkeypatch.setattr(web, "find_ref", lambda label: 12 if label == "뉴스" else None)
+    monkeypatch.setattr(web, "find_ref", lambda label, occurrence=1: {("뉴스", 1): 12, ("뉴스", 2): 15}.get((label, occurrence)))
+    monkeypatch.setattr(web, "current_host", lambda: "news.example.com")
     assert resolve_action({"tool": "web_click", "args": {"number": 4}, "label": "뉴스"}) == [("web_click", {"number": 12})]
+    assert resolve_action({"tool": "web_click", "args": {"number": 4}, "label": "뉴스", "occurrence": 2}) == \
+        [("web_click", {"number": 15})]
     with pytest.raises(LookupError):
         resolve_action({"tool": "web_click", "args": {"number": 4}, "label": "없는 버튼"})
+    with pytest.raises(LookupError):  # recorded on another site
+        resolve_action({"tool": "web_click", "args": {"number": 4}, "label": "뉴스", "host": "shop.example.com"})

@@ -8,7 +8,6 @@
   never types them. Banking sites are blocked (web_blocked_sites in settings).
 """
 
-import base64
 import io
 import json
 import re
@@ -18,9 +17,10 @@ from datetime import datetime
 from pathlib import Path
 
 from agent import config
+from agent.safety import SAFE_OPEN_EXTS, is_protected, risky_word_in, session
+from agent.texts import say
 from agent.tooling import tool
 
-EXECUTABLE_EXTS = {".exe", ".msi", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".jar", ".scr", ".com", ".reg", ".hta"}
 SEARCH_URLS = {
     "google": "https://www.google.com/search?q={q}",
     "naver": "https://search.naver.com/search.naver?query={q}",
@@ -41,11 +41,30 @@ _view_state = {"parts": [], "title": "", "url": ""}
 PROFILE_DIR = None  # override (used by the setup check so it doesn't collide with a running agent)
 
 # Turns the page into numbered text. Runs inside the browser.
+LABEL_FN = r"""
+  const MAX_LABEL = 100;
+  const labelOf = el => {
+    let t = el.getAttribute('aria-label') || '';
+    if (!t && el.id) {
+      const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+      if (l) t = l.innerText;
+    }
+    if (!t && el.tagName === 'INPUT' && el.closest('label')) t = el.closest('label').innerText;
+    if (!t && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) t = el.placeholder || el.title || el.name || '';
+    if (!t && el.tagName === 'SELECT') t = el.title || el.name || '';
+    if (!t && el.tagName !== 'SELECT') t = el.innerText || el.value || el.title || '';
+    if (!t) { const img = el.querySelector('img[alt]'); if (img) t = img.alt; }
+    return clean(t).slice(0, MAX_LABEL);
+  };
+"""
+
 SNAPSHOT_JS = r"""
-() => {
-  const MAX_LABEL = 100, MAX_LINES = 3000;
+(start) => {
+  const MAX_LINES = 3000;
+  const clean = t => (t || '').replace(/\s+/g, ' ').trim();
+__LABEL_FN__
   document.querySelectorAll('[data-agent-ref]').forEach(e => e.removeAttribute('data-agent-ref'));
-  let next = 1;
+  let next = start || 1;
   const lines = [];
   let buf = [];
   const flush = (prefix) => {
@@ -61,7 +80,6 @@ SNAPSHOT_JS = r"""
   const BLOCK = new Set(['block', 'flex', 'grid', 'list-item', 'table', 'table-row', 'table-caption',
                          'flow-root', 'table-row-group', 'table-header-group']);
   const host = location.hostname;
-  const clean = t => (t || '').replace(/\s+/g, ' ').trim();
   const isInteractive = el => {
     const tag = el.tagName;
     if (tag === 'A') return el.hasAttribute('href');
@@ -70,19 +88,6 @@ SNAPSHOT_JS = r"""
     const role = el.getAttribute('role');
     if (role && ROLES.has(role)) return true;
     return el.isContentEditable && el.hasAttribute('contenteditable');
-  };
-  const labelOf = el => {
-    let t = el.getAttribute('aria-label') || '';
-    if (!t && el.id) {
-      const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-      if (l) t = l.innerText;
-    }
-    if (!t && el.tagName === 'INPUT' && el.closest('label')) t = el.closest('label').innerText;
-    if (!t && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) t = el.placeholder || el.title || el.name || '';
-    if (!t && el.tagName === 'SELECT') t = el.title || el.name || '';
-    if (!t && el.tagName !== 'SELECT') t = el.innerText || el.value || el.title || '';
-    if (!t) { const img = el.querySelector('img[alt]'); if (img) t = img.alt; }
-    return clean(t).slice(0, MAX_LABEL);
   };
   const kindOf = el => {
     const tag = el.tagName, type = (el.getAttribute('type') || '').toLowerCase();
@@ -152,12 +157,14 @@ SNAPSHOT_JS = r"""
   } else if (document.body) {
     walk(document.body, null); flush();
   }
-  return {title: document.title, url: location.href, text: lines.join('\n'), refs: next - 1};
+  return {title: document.title, url: location.href, text: lines.join('\n'), next: next};
 }
-"""
+""".replace("__LABEL_FN__", LABEL_FN)
 
 ELEMENT_INFO_JS = r"""
 el => {
+  const clean = t => (t || '').replace(/\s+/g, ' ').trim();
+__LABEL_FN__
   const f = el.form || el.closest('form');
   const tag = el.tagName.toLowerCase(), type = (el.getAttribute('type') || '').toLowerCase();
   const isSubmit = (tag === 'button' && (type === '' || type === 'submit') && !!f) ||
@@ -167,12 +174,14 @@ el => {
       !!f.querySelector('input[type=search], input[name=q], input[name=query], input[name=search], input[name=keyword], input[name=k]'));
   const fieldSearch = type === 'search' || el.getAttribute('role') === 'searchbox' ||
       ['q', 'query', 'search', 'keyword', 'k'].includes((el.name || '').toLowerCase());
-  const secret = type === 'password' || /^cc-/.test(el.getAttribute('autocomplete') || '') ||
-      /card.?num|cardnumber|cvc|cvv|ccnum|카드번호|보안코드|비밀번호|passwort/i.test((el.name || '') + ' ' + (el.id || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.placeholder || ''));
-  const label = (el.innerText || el.value || el.getAttribute('aria-label') || el.title || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  const auto = el.getAttribute('autocomplete') || '';
+  const hints = (el.name || '') + ' ' + (el.id || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.placeholder || '');
+  const secret = type === 'password' || /^cc-/.test(auto) || ['one-time-code', 'current-password', 'new-password'].includes(auto) ||
+      /card.?num|cardnumber|cvc|cvv|ccnum|\bpin\b|\botp\b|\bssn\b|iban|account.?n|카드번호|보안코드|비밀번호|주민|계좌|인증번호|passwort/i.test(hints);
+  const label = labelOf(el);
   return {label, tag, type, isSubmit, inForm: !!f, isSearch: isSearch || fieldSearch, secret, href: el.href || ''};
 }
-"""
+""".replace("__LABEL_FN__", LABEL_FN)
 
 TABLES_JS = r"""
 () => [...document.querySelectorAll('table')].filter(t => t.getClientRects().length).map(t => {
@@ -242,6 +251,14 @@ def _launch():
 
 def _page():
     """The current tab, starting the browser if needed (or again, if you closed it)."""
+    if _browser["context"] is not None:
+        try:  # a cheap round-trip that fails if you closed the browser window
+            if _browser["page"] is not None and not _browser["page"].is_closed():
+                _browser["page"].title()
+            else:
+                len(_browser["context"].pages)
+        except Exception:
+            _browser.update(context=None, page=None)
     if _browser["context"] is None:
         _launch()
     page = _browser["page"]
@@ -264,7 +281,7 @@ def shutdown():
 
 
 def _blocked(url: str):
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    host = (urllib.parse.urlparse(url).hostname or "").lower().rstrip(".")
     for site in _settings["web_blocked_sites"]:
         site = site.lower().strip()
         if site and (host == site or host.endswith("." + site)):
@@ -349,31 +366,87 @@ def _snapshot(note: str = None) -> dict:
     if site:
         return {"error": f"{site} is on the blocked list (banking/private). Ask the user to do this themselves.",
                 "url": page.url}
-    data = page.evaluate(SNAPSHOT_JS)
-    _view_state.update(parts=_split(data["text"], int(_settings["web_page_chars"])),
-                       title=data["title"], url=data["url"])
+    data = page.evaluate(SNAPSHOT_JS, 1)
+    text, next_ref = data["text"], data["next"]
+    frame_texts = []
+    for frame in page.frames[1:15]:  # embedded frames, e.g. Naver Blog posts live in one
+        try:
+            if frame.is_detached() or not frame.url.startswith("http") or _blocked(frame.url):
+                continue
+            part = frame.evaluate(SNAPSHOT_JS, next_ref)
+            next_ref = part["next"]
+            if part["text"].strip():
+                host = urllib.parse.urlparse(frame.url).hostname
+                frame_texts.append(f"--- embedded frame ({host}) ---\n" + part["text"])
+        except Exception:
+            continue
+    if frame_texts:
+        marker = "--- rest of the page (menus, sidebars, footer) ---"
+        if marker in text:
+            head, tail = text.split(marker, 1)
+            text = head + "\n".join(frame_texts) + "\n" + marker + tail
+        else:
+            text = text + "\n" + "\n".join(frame_texts)
+    _view_state.update(parts=_split(text, int(_settings["web_page_chars"])), title=data["title"], url=data["url"])
     return _view(1, note)
 
 
+_ELEMENT = re.compile(r"\[(\d+)\] [^\"\n\[]*\"([^\"\n]*)\"")
+
+
 def label_of_ref(number: int):
-    """The label shown for element [number] in the latest page view."""
-    match = re.search(r"\[" + str(int(number)) + r"\] [^\"\n]*\"([^\"\n]*)\"", "\n".join(_view_state["parts"]))
-    return match.group(1) if match and match.group(1) else None
+    """(label, occurrence) of element [number] in the latest page view. The occurrence says which one
+    it is when several share a label (e.g. two "Download" links). None if it has no label."""
+    seen = {}
+    for match in _ELEMENT.finditer("\n".join(_view_state["parts"])):
+        label = match.group(2)
+        seen[label] = seen.get(label, 0) + 1
+        if int(match.group(1)) == int(number):
+            return [label, seen[label]] if label else None
+    return None
 
 
-def find_ref(label: str):
+def find_ref(label: str, occurrence: int = 1):
     """Read the page again and return the number of the element with this label (for routines)."""
     _snapshot()
-    match = re.search(r"\[(\d+)\] [^\"\n]*\"" + re.escape(label) + "\"", "\n".join(_view_state["parts"]))
-    return int(match.group(1)) if match else None
+    count = 0
+    for match in _ELEMENT.finditer("\n".join(_view_state["parts"])):
+        if match.group(2) == label:
+            count += 1
+            if count == occurrence:
+                return int(match.group(1))
+    return None
+
+
+def current_host() -> str:
+    """Host name of the page the agent's browser shows now ("" if the browser isn't open)."""
+    page = _browser.get("page")
+    try:
+        return (urllib.parse.urlparse(page.url).hostname or "") if page is not None and not page.is_closed() else ""
+    except Exception:
+        return ""
+
+
+def _ensure_allowed(url: str):
+    site = _blocked(url)
+    if site:
+        raise LookupError(f"{site} is on the blocked list (banking/private). Ask the user to do this themselves.")
 
 
 def _ref(number: int):
     page = _page()
-    locator = page.locator(f'[data-agent-ref="{int(number)}"]')
-    if locator.count() == 0:
-        raise LookupError(f"No element [{number}] on the page now. Call web_read to get fresh numbers.")
-    return locator.first
+    _ensure_allowed(page.url)
+    for frame in page.frames:
+        try:
+            locator = frame.locator(f'[data-agent-ref="{int(number)}"]')
+            if locator.count():
+                _ensure_allowed(frame.url)
+                return locator.first
+        except LookupError:
+            raise
+        except Exception:
+            continue
+    raise LookupError(f"No element [{number}] on the page now. Call web_read to get fresh numbers.")
 
 
 def _info(number: int) -> dict:
@@ -384,10 +457,24 @@ def _info(number: int) -> dict:
 
 
 def _risky_label(label: str):
-    lowered = (label or "").lower()
-    for word in _settings["risky_click_words"]:
-        if word.lower() in lowered:
-            return f'Clicks "{label}" on a web page - this may send, delete, buy or submit something'
+    if risky_word_in(label, _settings["risky_click_words"]):
+        return say(f'웹페이지에서 "{label}"을(를) 눌러요. 전송·삭제·구매·제출이 될 수 있어요.',
+                   f'Clicks "{label}" on a web page - this may send, delete, buy or submit something')
+    return None
+
+
+def _risk_url(url: str):
+    """Opening an address can carry data out (the part after "?"). Ask when this command already read
+    the user's private data (files, clipboard, screen), or when the address carries a lot of data."""
+    if not url:
+        return None
+    parts = urllib.parse.urlparse(url if re.match(r"^[a-z][a-z0-9+.-]*:", url, re.I) else "https://" + url)
+    if parts.scheme.lower() not in ("http", "https"):
+        return say(f"웹 주소가 아닌 것을 열어요: {url}", f"Opens something that is not a web address: {url}")
+    payload = len(parts.query) + len(parts.fragment)
+    if payload > 400 or (session["private_data_read"] and payload > 40):
+        return say(f"데이터가 담긴 주소를 열어요. 방금 읽은 내용이 밖으로 나갈 수 있어요:\n{url}",
+                   f"Opens an address that carries data; what was just read could leave your PC:\n{url}")
     return None
 
 
@@ -400,7 +487,7 @@ def _site():
 
 # ---------------------------------------------------------------------- tools: browsing
 
-@tool()
+@tool(risk=lambda a: _risk_url(a.get("url", "")))
 def web_open(url: str) -> dict:
     """Open a web page in the agent's browser and read it. Use this (not open_url) whenever you
     need to read or act on a website yourself.
@@ -458,7 +545,8 @@ def _risk_click(args):
     if reason:
         return reason
     if info.get("isSubmit") and not info.get("isSearch"):
-        return f'Submits a form on {_site()} (button "{info.get("label", "")}")'
+        return say(f'{_site()}에서 양식을 제출해요 (버튼 "{info.get("label", "")}")',
+                   f'Submits a form on {_site()} (button "{info.get("label", "")}")')
     return None
 
 
@@ -482,11 +570,16 @@ def web_click(number: int) -> dict:
 
 
 def _risk_type(args):
+    text = str(args.get("text", ""))
+    if session["private_data_read"] and len(text) > 200:
+        return say(f"{_site()}에 긴 글({len(text)}자)을 입력해요. 방금 읽은 내용이 밖으로 나갈 수 있어요.",
+                   f"Types {len(text)} characters into {_site()}; what was just read could leave your PC.")
     if not args.get("press_enter"):
         return None
     info = _info(args.get("number", 0))
-    if info and info.get("inForm") and not info.get("isSearch"):
-        return f"Types and presses Enter, which submits a form on {_site()}"
+    if not info.get("isSearch"):  # Enter in anything but a search box may submit or send
+        return say(f"{_site()}에서 입력 후 Enter를 눌러요. 제출되거나 전송될 수 있어요.",
+                   f"Types and presses Enter on {_site()}, which may submit or send something")
     return None
 
 
@@ -501,9 +594,9 @@ def web_type(number: int, text: str, press_enter: bool = False) -> dict:
       press_enter: Press Enter afterwards (e.g. to search).
     """
     info = _info(number)
-    if info.get("secret"):
-        return {"error": "This is a password or payment field. Do not type it: call web_ask_user so the user "
-                         "enters it themselves."}
+    if not info or info.get("secret"):  # if we can't tell, treat it as private
+        return {"error": "This looks like a password, PIN, ID-number or payment field (or it could not be "
+                         "checked). Do not type it: call web_ask_user so the user enters it themselves."}
     try:
         element = _ref(number)
         element.fill(text, timeout=8000)
@@ -632,7 +725,12 @@ _tables_cache = []
 def web_get_tables() -> dict:
     """List the data tables on the current page (prices, schedules, rankings...) with a preview,
     so one can be saved with web_save_table."""
-    _tables_cache[:] = _page().evaluate(TABLES_JS)
+    page = _page()
+    try:
+        _ensure_allowed(page.url)
+    except LookupError as e:
+        return {"error": str(e)}
+    _tables_cache[:] = page.evaluate(TABLES_JS)
     return {"tables": [{"number": i + 1, "title": t["title"], "rows": len(t["rows"]),
                         "preview": t["rows"][:3]} for i, t in enumerate(_tables_cache)] or "No tables on this page."}
 
@@ -651,7 +749,12 @@ def web_save_table(table_number: int, path: str) -> dict:
       path: Where to save, e.g. "C:\\Users\\me\\Documents\\prices.xlsx".
     """
     from agent.tools.files import save_rows
-    _tables_cache[:] = _page().evaluate(TABLES_JS)  # fresh, in case the page changed
+    page = _page()
+    try:
+        _ensure_allowed(page.url)
+    except LookupError as e:
+        return {"error": str(e)}
+    _tables_cache[:] = page.evaluate(TABLES_JS)  # fresh, in case the page changed
     if not 1 <= table_number <= len(_tables_cache):
         return {"error": "No such table. Call web_get_tables first."}
     rows = _tables_cache[table_number - 1]["rows"]
@@ -659,10 +762,10 @@ def web_save_table(table_number: int, path: str) -> dict:
 
 
 def _download_target(folder: str, name: str) -> Path:
-    from agent.tools.files import known_folders
-    base = Path(folder) if folder else Path(known_folders()["Downloads"])
+    from agent.tools.files import _path, known_folders
+    base = _path(folder) if folder else Path(known_folders()["Downloads"])
     base.mkdir(parents=True, exist_ok=True)
-    name = re.sub(r'[\\/:*?"<>|]', "_", name or "download")
+    name = re.sub(r'[\\/:*?"<>|]', "_", name or "download").strip(" .") or "download"
     target = base / name
     counter = 1
     while target.exists():
@@ -671,41 +774,72 @@ def _download_target(folder: str, name: str) -> Path:
     return target
 
 
+def _is_program(name: str) -> bool:
+    suffix = Path(name or "").suffix.lower()
+    return bool(suffix) and suffix not in SAFE_OPEN_EXTS
+
+
+def _filename_from_headers(headers: dict, url: str) -> str:
+    disposition = headers.get("content-disposition", "")
+    star = re.search(r"filename\*\s*=\s*([\w-]+)''([^;]+)", disposition, re.I)  # RFC 5987: UTF-8''%ED%95%9C
+    if star:
+        return urllib.parse.unquote(star.group(2).strip().strip('"'), encoding=star.group(1) or "utf-8")
+    plain = re.search(r'filename\s*=\s*"?([^";]+)"?', disposition, re.I)
+    if plain:
+        return urllib.parse.unquote(plain.group(1).strip())
+    return urllib.parse.unquote(Path(urllib.parse.urlparse(url).path).name)
+
+
 def _risk_download(args):
+    folder = args.get("folder", "")
+    if folder and is_protected(folder):
+        return say(f"보호된 시스템 폴더에 저장해요: {folder}", f"Saves into a protected system folder: {folder}")
+    if args.get("allow_program"):
+        return say("프로그램·스크립트 파일을 내려받아요 (열기 전에 다시 확인해요)",
+                   "Downloads a program or script file (it will not be opened without asking)")
     url = args.get("url", "")
     if args.get("number"):
         url = _info(args["number"]).get("href", "") or url
-    suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
-    if suffix in EXECUTABLE_EXTS:
-        return f"Downloads a program/script file ({suffix})"
-    return None
+    return _risk_url(url) if url and not args.get("number") else None
 
 
 @tool(risk=_risk_download)
-def web_download(number: int = 0, url: str = "", folder: str = "") -> dict:
+def web_download(number: int = 0, url: str = "", folder: str = "", allow_program: bool = False) -> dict:
     """Download a file: either by clicking a download link/button [number], or from a direct URL.
-    Saved to the Downloads folder unless another folder is given.
+    Saved to the Downloads folder unless another folder is given. Programs and scripts are refused
+    unless allow_program is true (the user is asked).
 
     Args:
       number: Element number of the download link/button (0 if using url).
       url: Direct address of the file (used when number is 0).
       folder: Folder to save into. Empty = the user's Downloads folder.
+      allow_program: Set true only when the user clearly wants a program or script file.
     """
     page = _page()
+    refused = {"error": "That file is a program or script. Ask the user; only if they want it, call again with "
+                        "allow_program=true."}
     try:
         if number:
             with page.expect_download(timeout=60000) as info:
                 _ref(number).click(timeout=8000)
             download = info.value
+            if _blocked(download.url):
+                download.cancel()
+                return {"error": "That download comes from a blocked site."}
+            if _is_program(download.suggested_filename) and not allow_program:
+                download.cancel()
+                return refused
             target = _download_target(folder, download.suggested_filename)
             download.save_as(str(target))
         elif url:
+            _ensure_allowed(url)
             response = _browser["context"].request.get(url, timeout=120000)
             if not response.ok:
                 return {"error": f"Download failed: HTTP {response.status}"}
-            disposition = response.headers.get("content-disposition", "")
-            match = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", disposition)
-            name = urllib.parse.unquote(match.group(1)) if match else Path(urllib.parse.urlparse(url).path).name
+            _ensure_allowed(response.url)
+            name = _filename_from_headers(response.headers, response.url)
+            if _is_program(name) and not allow_program:
+                return refused
             target = _download_target(folder, name)
             target.write_bytes(response.body())
         else:
@@ -735,7 +869,8 @@ def _save_watches(watches: list):
     _watches_file().write_text(json.dumps(watches, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-@tool()
+@tool(risk=lambda a: say(f"이 페이지를 {a.get('interval_minutes', 60)}분마다 자동으로 확인해요: {a.get('url')}",
+                         f"Checks this page every {a.get('interval_minutes', 60)} minutes, unattended: {a.get('url')}"))
 def watch_page(url: str, keyword: str = "", interval_minutes: int = 60) -> dict:
     """Keep checking a web page and tell the user when something new appears (new posts, a price
     change, a notice...). Runs while the agent is running.
@@ -754,9 +889,9 @@ def watch_page(url: str, keyword: str = "", interval_minutes: int = 60) -> dict:
     watches.append({"id": new_id, "url": url, "keyword": keyword, "interval_minutes": max(5, int(interval_minutes)),
                     "last_check": 0, "lines": None, "created": datetime.now().isoformat(timespec="minutes")})
     _save_watches(watches)
-    message = check_watch(new_id)  # first look = baseline
+    result = check_watch(new_id)  # first look = baseline
     return {"watching": url, "number": new_id, "every_minutes": max(5, int(interval_minutes)),
-            "first_check": message or "baseline saved"}
+            "first_check": result.get("error") or "baseline saved"}
 
 
 @tool()
@@ -784,23 +919,39 @@ def due_watches() -> list:
     return [w["id"] for w in _load_watches() if now - w["last_check"] >= w["interval_minutes"] * 60]
 
 
-def check_watch(watch_id: int):
-    """Look at a watched page. Returns a message if something new appeared, else None."""
+_DIGITS = re.compile(r"\d+")
+
+
+def _comparable(line: str) -> str:
+    """Numbers are ignored when comparing (clocks, view counters...), so they don't count as news."""
+    return _DIGITS.sub("#", line)
+
+
+def check_watch(watch_id: int) -> dict:
+    """Look at a watched page. Returns {"new": message} when something new appeared, {"error": ...} when
+    the page couldn't be checked, or {} when nothing changed. Failures wait for the next interval."""
     watches = _load_watches()
     watch = next((w for w in watches if w["id"] == watch_id), None)
     if watch is None:
-        return None
-    _page()
+        return {}
+    watch["last_check"] = time.time()  # also on failure: no retry every minute
+    _save_watches(watches)
+    if _blocked(watch["url"]):
+        return {"error": "blocked site"}
+    page = _page()
     tab = _browser["context"].new_page()
     try:
         tab.goto(watch["url"], wait_until="domcontentloaded", timeout=30000)
         _wait_settle(tab)
+        if _blocked(tab.url):
+            return {"error": "redirected to a blocked site"}
         text = tab.evaluate("document.body ? document.body.innerText : ''")
     except Exception as e:
-        return f"Could not check {watch['url']}: {str(e).splitlines()[0][:120]}"
+        return {"error": str(e).splitlines()[0][:120]}
     finally:
         try:
             tab.close()
+            page.bring_to_front()
         except Exception:
             pass
     lines = [" ".join(line.split()) for line in text.splitlines()]
@@ -808,15 +959,17 @@ def check_watch(watch_id: int):
     if watch["keyword"]:
         lines = [line for line in lines if watch["keyword"].lower() in line.lower()]
     lines = lines[:500]
-    previous = watch["lines"]
-    watch["last_check"] = time.time()
+    watches = _load_watches()
+    watch = next((w for w in watches if w["id"] == watch_id), watch)
+    previous = watch.get("lines")
     watch["lines"] = lines
     _save_watches(watches)
     if previous is None:
-        return None
-    seen = set(previous)
-    added = [line for line in lines if line not in seen]
+        return {}
+    seen = {_comparable(line) for line in previous}
+    added = [line for line in lines if _comparable(line) not in seen]
     if not added:
-        return None
+        return {}
     shown = "\n".join(f"  {line[:150]}" for line in added[:8])
-    return f"New on {watch['url']}" + (f" (about '{watch['keyword']}')" if watch["keyword"] else "") + f":\n{shown}"
+    about = f" ('{watch['keyword']}')" if watch["keyword"] else ""
+    return {"new": f"{watch['url']}{about}:\n{shown}", "url": watch["url"]}

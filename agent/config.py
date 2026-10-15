@@ -8,6 +8,7 @@
 
 import json
 import os
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,9 +67,14 @@ DEFAULT_BRAINS = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "api_key_env": "GEMINI_API_KEY",
         "model": "gemini-flash-latest",
-        # Each Gemini model has its own free limit: when one runs out, use the next Flash model.
+        # Each Gemini model has its own free DAILY limit: when one runs out, the next one is used
+        # until midnight Pacific time. Per-minute limits are just waited out.
         "auto_switch_models": True,
         "model_filter": "flash",
+        "candidate_models": ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest",
+                             "gemini-2.5-flash-lite"],
+        # Less "thinking" per step: faster answers and fewer tokens ("low" works on all Flash models).
+        "reasoning_effort": "low",
         "vision": True,
         "price_input": 0, "price_output": 0,  # free tier; put real prices here if you enable billing
         "timeout": 120,
@@ -94,8 +100,14 @@ DEFAULT_SETTINGS = {
     "cloud_monthly_budget_usd": 6.0,
     "brains": DEFAULT_BRAINS,
 
-    # Voice commands are transcribed by Gemini (one small request per command).
-    "voice_model": "gemini-flash-latest",
+    # Voice commands are transcribed by Gemini (one small request per command). A "lite" model has
+    # its own, larger free limit, so voice doesn't use up the main AI's requests.
+    "voice_model": "gemini-flash-lite-latest",
+    # Language of the popup, tray and messages: "ko" or "en". (The AI always answers in your language.)
+    "ui_language": "ko",
+    # Text size in the popup (bigger = easier to read). Where you leave the popup is remembered.
+    "ui_font_size": 10,
+    "popup_geometry": "",
 
     # Hold this to talk, release to send.
     "push_to_talk_hotkey": "ctrl+alt+space",
@@ -120,8 +132,8 @@ DEFAULT_SETTINGS = {
     # Speech speed from -10 (slow) to 10 (fast).
     "speech_rate": 1,
 
-    # Safety limits.
-    "max_steps_per_command": 25,
+    # Safety limits (each step is one AI request; the free Gemini tier allows only a limited number).
+    "max_steps_per_command": 15,
     "max_recording_seconds": 60,
 
     # How much of the conversation the agent keeps in mind.
@@ -164,6 +176,8 @@ DEFAULT_SETTINGS = {
         "postbank.de", "paypal.com",
     ],
     # In these programs, pressing Enter usually sends a message, so it asks you first.
+    # Programs whose windows are never captured or controlled (password managers).
+    "private_programs": ["1password", "bitwarden", "keepass", "lastpass", "dashlane", "enpass", "nordpass"],
     "messaging_apps": ["kakaotalk", "slack", "discord", "teams", "telegram", "whatsapp", "line",
                        "outlook", "thunderbird", "signal", "wechat", "messenger"],
 }
@@ -183,9 +197,15 @@ def load_settings() -> dict:
         if "model" in raw and "voice_model" not in raw:
             raw["voice_model"] = raw["model"]
         raw.pop("model", None)
+        if raw.get("voice_model") == "gemini-flash-latest":  # old default shared the main AI's limit
+            raw["voice_model"] = DEFAULT_SETTINGS["voice_model"]
+        if raw.get("max_steps_per_command") == 25:  # old default
+            raw["max_steps_per_command"] = DEFAULT_SETTINGS["max_steps_per_command"]
         for old_key in REMOVED_SETTINGS:
             raw.pop(old_key, None)
         user_brains = raw.pop("brains", {})
+        if not isinstance(user_brains, dict):
+            user_brains = {}
         for name in REMOVED_BRAINS:
             user_brains.pop(name, None)
             for key in ("main_brain", "backup_brain"):
@@ -193,7 +213,9 @@ def load_settings() -> dict:
                     raw[key] = DEFAULT_SETTINGS[key]
         settings.update(raw)
         for name, profile in user_brains.items():
-            settings["brains"][name] = {**settings["brains"].get(name, {}), **profile}
+            if isinstance(profile, dict):
+                settings["brains"][name] = {**settings["brains"].get(name, {}), **profile}
+    settings = _repair(settings)
     if settings != _read_raw_settings():
         save_settings(settings)
     return settings
@@ -202,17 +224,53 @@ def load_settings() -> dict:
 def _read_raw_settings():
     if not SETTINGS_FILE.exists():
         return None
+    raw = SETTINGS_FILE.read_bytes()
     try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        text = raw.decode("utf-8-sig")  # Notepad may add a BOM
+    except UnicodeDecodeError:
+        text = raw.decode("cp949", errors="replace")  # saved as "ANSI" on Korean Windows
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError as e:
         raise ValueError(
             f"settings.json has a typo near line {e.lineno}: {e.msg}. "
             "Fix it, or delete the file to get the defaults back."
         ) from e
+    if not isinstance(data, dict):
+        raise ValueError("settings.json must start with { and end with }. Delete the file to get the defaults back.")
+    return data
+
+
+def _repair(settings: dict) -> dict:
+    """Put back defaults for values with the wrong type (e.g. "brains": null), so a hand edit can't
+    stop the agent from starting."""
+    for key, default in DEFAULT_SETTINGS.items():
+        value = settings.get(key)
+        if isinstance(default, bool):
+            ok = isinstance(value, bool)
+        elif isinstance(default, (int, float)):
+            ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+        else:
+            ok = isinstance(value, type(default))
+        if not ok:
+            settings[key] = json.loads(json.dumps(default))
+    brains = {}
+    for name, profile in settings["brains"].items():
+        if isinstance(profile, dict) and profile.get("base_url") and profile.get("model"):
+            brains[name] = profile
+    settings["brains"] = brains or json.loads(json.dumps(DEFAULT_BRAINS))
+    return settings
+
+
+_SAVE_LOCK = threading.Lock()
 
 
 def save_settings(settings: dict) -> None:
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+    """Write settings.json in one step (a crash mid-write can't leave a half-written file)."""
+    with _SAVE_LOCK:  # the tray, the popup and the agent may save at the same moment
+        temp = SETTINGS_FILE.with_name(SETTINGS_FILE.name + ".tmp")
+        temp.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, SETTINGS_FILE)
 
 
 def load_env() -> None:
@@ -224,17 +282,18 @@ def load_env() -> None:
 
 
 def get_key(env_name: str) -> str:
-    """Read an API key from .env. Returns "" when it isn't set."""
+    """Read an API key. The .env file wins (it is read fresh, so a key set while the agent runs is used
+    right away); a Windows environment variable is the fallback. Returns "" when it isn't set."""
     if not env_name:
         return ""
-    load_env()
-    key = os.environ.get(env_name, "").strip()
-    if not key or key.startswith("paste-your"):  # .env may have changed since it was first loaded
-        try:
-            from dotenv import dotenv_values
-            key = (dotenv_values(ENV_FILE).get(env_name) or "").strip()
-        except Exception:
-            pass
+    key = ""
+    try:
+        from dotenv import dotenv_values
+        key = (dotenv_values(ENV_FILE).get(env_name) or "").strip()
+    except Exception:
+        pass
+    if not key or key.startswith("paste-your"):
+        key = os.environ.get(env_name, "").strip()
     return "" if key.startswith("paste-your") else key
 
 

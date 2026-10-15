@@ -15,15 +15,24 @@ import threading
 import time
 import wave
 
+from agent.texts import say
 from agent.winutil import CREATE_NO_WINDOW
 
 SAMPLE_RATE = 16000  # 16 kHz mono is plenty for speech and keeps uploads small
+
+
+class SilentRecording(Exception):
+    """The microphone delivered only silence (muted, unplugged, or blocked by Windows privacy settings)."""
+
+
+SILENCE_PEAK = 300  # loudest sample below this (out of 32767) means nothing was picked up
 
 
 class Recorder:
     def __init__(self):
         self._stream = None
         self._frames = []
+        self._lock = threading.Lock()
         self.started_at = 0.0
 
     @property
@@ -32,25 +41,42 @@ class Recorder:
 
     def start(self):
         import sounddevice as sd
-        self._frames = []
-        self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-                                      callback=lambda data, *_: self._frames.append(data.copy()))
-        self._stream.start()
-        self.started_at = time.time()
+        with self._lock:
+            if self._stream is not None:  # already recording (hotkey and button at once)
+                return
+            self._frames = []
+            stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+                                    callback=lambda data, *_: self._frames.append(data.copy()))
+            try:
+                stream.start()
+            except Exception:
+                stream.close()
+                raise
+            self._stream = stream  # only once it really runs, so a failed start doesn't look like recording
+            self.started_at = time.time()
+        _beep(880)
 
     def stop(self):
-        """Stop recording. Returns WAV bytes, or None if the recording was too short."""
+        """Stop recording. Returns WAV bytes, or None if the recording was too short.
+        Raises SilentRecording if the microphone picked up nothing at all."""
         import numpy as np
-        if self._stream is None:
+        with self._lock:
+            stream, self._stream = self._stream, None
+        if stream is None:
             return None
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
+        _beep(660)
         if not self._frames:
             return None
         audio = np.concatenate(self._frames)
         if len(audio) < SAMPLE_RATE * 0.4:  # shorter than 0.4 s: probably an accidental press
             return None
+        if int(np.abs(audio.astype(np.int32)).max()) < SILENCE_PEAK:
+            raise SilentRecording()
         buffer = io.BytesIO()
         with wave.open(buffer, "wb") as wav:
             wav.setnchannels(1)
@@ -58,6 +84,17 @@ class Recorder:
             wav.setframerate(SAMPLE_RATE)
             wav.writeframes(audio.tobytes())
         return buffer.getvalue()
+
+
+def _beep(frequency: int):
+    """A short, quiet tick so you know recording started/stopped (runs in the background)."""
+    def play():
+        try:
+            import winsound
+            winsound.Beep(frequency, 60)
+        except Exception:
+            pass
+    threading.Thread(target=play, daemon=True).start()
 
 
 # ---------------------------------------------------------------------- speaking
@@ -147,10 +184,12 @@ class Speaker:
                 code = self._process.wait()
                 if code == 3 and culture not in self._warned:
                     self._warned.add(culture)
-                    self.on_notice(f"No {culture} voice is installed in Windows, so replies in that language "
-                                   "are not spoken. See README > 'Voices' to add one.")
+                    self.on_notice(say(f"Windows에 {culture} 음성이 없어서 이 언어의 답변은 읽어 줄 수 없어요. "
+                                       "README의 '음성 추가' 부분을 참고하세요.",
+                                       f"No {culture} voice is installed in Windows, so replies in that language "
+                                       "are not spoken. See README > 'Voices' to add one."))
             except Exception as e:
-                self.on_notice(f"Could not speak: {e}")
+                self.on_notice(say(f"소리로 읽지 못했어요: {e}", f"Could not speak: {e}"))
 
 
 def list_voices() -> list:

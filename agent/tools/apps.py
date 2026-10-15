@@ -4,7 +4,9 @@ import difflib
 import json
 import os
 import subprocess
+import time
 
+from agent.texts import say
 from agent.tooling import tool
 from agent.winutil import run_powershell
 
@@ -21,6 +23,14 @@ BUILTIN_APPS = {
     "control panel": "control.exe", "제어판": "control.exe",
     "snipping tool": "ms-screenclip:",
 }
+
+# Programs that can run any command or change the system: starting them asks first, because typing
+# into them would otherwise bypass the approval that run_command needs.
+POWERFUL_APPS = ("cmd", "command prompt", "명령 프롬프트", "powershell", "pwsh", "terminal", "터미널", "wt.exe",
+                 "wscript", "cscript", "mshta", "regedit", "registry", "레지스트리", "task scheduler", "작업 스케줄러",
+                 "wsl", "bash", "control panel", "제어판", "task manager", "작업 관리자", "services", "서비스")
+SHELL_PROCESSES = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe", "wt.exe", "conhost.exe",
+                   "openconsole.exe", "wsl.exe", "bash.exe", "mintty.exe", "putty.exe", "regedit.exe", "mmc.exe"}
 
 PROTECTED_PROCESSES = {"system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe",
                        "services.exe", "lsass.exe", "svchost.exe", "dwm.exe", "fontdrvhost.exe"}
@@ -51,7 +61,33 @@ def _best_matches(query: str, names: list) -> list:
     return [lowered[m] for m in difflib.get_close_matches(q, list(lowered), n=5, cutoff=0.6)]
 
 
-@tool()
+def _risk_open_app(args):
+    name = str(args.get("name", "")).lower()
+    resolved = BUILTIN_APPS.get(name.strip(), "")
+    if _start_apps_cache is not None and not resolved:
+        matches = _best_matches(name, [a["Name"] for a in _start_apps_cache])
+        resolved = matches[0].lower() if matches else ""
+    if any(word in name or word in resolved.lower() for word in POWERFUL_APPS):
+        return say(f"명령을 실행하거나 시스템을 바꿀 수 있는 프로그램을 열어요: {args.get('name')}",
+                   f"Opens a program that can run commands or change the system: {args.get('name')}")
+    return None
+
+
+def _wait_for_new_window(before: set, seconds: float = 8.0):
+    """After starting an app, wait until its window appears (saves the AI a 'wait' step)."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        time.sleep(0.4)
+        try:
+            for w in _windows():
+                if w["id"] not in before and not w["minimized"]:
+                    return w["title"]
+        except Exception:
+            return None
+    return None
+
+
+@tool(risk=_risk_open_app)
 def open_app(name: str) -> dict:
     """Start an application by name, e.g. "Chrome", "Word", "Spotify", "Notepad", "KakaoTalk".
     Works for normal programs and Microsoft Store apps.
@@ -60,9 +96,13 @@ def open_app(name: str) -> dict:
       name: The app's name as it appears in the Start menu (English or Korean).
     """
     key = name.lower().strip()
+    try:
+        before = {w["id"] for w in _windows()}
+    except Exception:
+        before = set()
     if key in BUILTIN_APPS:
         os.startfile(BUILTIN_APPS[key])
-        return {"opened": name}
+        return {"opened": name, "window": _wait_for_new_window(before)}
     apps = _start_apps()
     matches = _best_matches(name, [a["Name"] for a in apps])
     if not matches:
@@ -73,7 +113,7 @@ def open_app(name: str) -> dict:
         os.startfile(app_id)
     else:
         subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app_id}"])
-    result = {"opened": chosen["Name"]}
+    result = {"opened": chosen["Name"], "window": _wait_for_new_window(before)}
     if len(matches) > 1:
         result["other_matches"] = matches[1:6]
     return result
@@ -124,7 +164,7 @@ def _windows() -> list:
             process = psutil.Process(pid).name()
         except Exception:
             process = "?"
-        found.append({"id": hwnd, "title": title, "program": process,
+        found.append({"id": hwnd, "title": title, "program": process, "pid": pid,
                       "minimized": bool(win32gui.IsIconic(hwnd)), "rect": win32gui.GetWindowRect(hwnd)})
 
     win32gui.EnumWindows(collect, None)
@@ -163,20 +203,72 @@ def focus_window(title_or_program: str) -> dict:
     return {"focused": window["title"]}
 
 
-def bring_to_front(hwnd: int):
+def bring_to_front(hwnd: int) -> bool:
+    """Make a window the active one. Windows normally refuses this to background programs, so the agent
+    briefly shares input with the current foreground window (AttachThreadInput). The old trick of
+    tapping Alt is avoided: it opens the app's menu, and the next paste or Enter would go there."""
+    import ctypes
     import win32api
     import win32con
     import win32gui
+    user32 = ctypes.windll.user32
     if win32gui.IsIconic(hwnd):
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-    # Windows only lets the active app change focus; tapping Alt works around that.
-    win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+    if user32.GetForegroundWindow() == hwnd:
+        return True
+    foreground = user32.GetForegroundWindow()
+    fg_thread = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+    own_thread = win32api.GetCurrentThreadId()
+    attached = bool(fg_thread and fg_thread != own_thread and user32.AttachThreadInput(own_thread, fg_thread, True))
     try:
-        win32gui.SetForegroundWindow(hwnd)
-    except Exception:
-        pass
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
     finally:
-        win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+        if attached:
+            user32.AttachThreadInput(own_thread, fg_thread, False)
+    if user32.GetForegroundWindow() == hwnd:
+        return True
+    # Last resort: a harmless key (F24, which no app uses) counts as input and unlocks the switch.
+    win32api.keybd_event(0x87, 0, 0, 0)
+    win32api.keybd_event(0x87, 0, win32con.KEYEVENTF_KEYUP, 0)
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.05)
+    return user32.GetForegroundWindow() == hwnd
+
+
+def _running_as_admin() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def is_elevated(pid: int) -> bool:
+    """True if a process runs as administrator. A normal program can't send keys or clicks to those
+    windows (Windows blocks it), so the agent should say so instead of failing silently."""
+    if _running_as_admin():
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32, advapi32 = ctypes.windll.kernel32, ctypes.windll.advapi32
+        process = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not process:
+            return True
+        token = wintypes.HANDLE()
+        try:
+            if not advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                return True
+            elevation, size = wintypes.DWORD(), wintypes.DWORD()
+            ok = advapi32.GetTokenInformation(token, 20, ctypes.byref(elevation), 4, ctypes.byref(size))
+            return bool(ok and elevation.value)
+        finally:
+            if token:
+                kernel32.CloseHandle(token)
+            kernel32.CloseHandle(process)
+    except Exception:
+        return False
 
 
 def _show_window(title_or_program: str, command: int, verb: str) -> dict:
@@ -220,7 +312,8 @@ def minimize_all_windows() -> dict:
     return {"done": True}
 
 
-@tool(risk=lambda a: f"Closes the window '{a.get('title_or_program')}' (the app may ask to save; unsaved work could be lost)")
+@tool(risk=lambda a: say(f"'{a.get('title_or_program')}' 창을 닫아요. 저장하지 않은 작업이 사라질 수 있어요.",
+                         f"Closes the window '{a.get('title_or_program')}' (unsaved work could be lost)"))
 def close_window(title_or_program: str) -> dict:
     """Close a window politely, like clicking its X button (the app may ask to save).
 
@@ -236,7 +329,8 @@ def close_window(title_or_program: str) -> dict:
     return {"closed": window["title"]}
 
 
-@tool(risk=lambda a: f"Force-quits every '{a.get('program_name')}' process. Unsaved work is lost")
+@tool(risk=lambda a: say(f"'{a.get('program_name')}' 프로그램을 강제로 꺼요. 저장하지 않은 작업은 사라져요.",
+                         f"Force-quits every '{a.get('program_name')}' process. Unsaved work is lost"))
 def end_program(program_name: str) -> dict:
     """Force-quit a program that is frozen or won't close, e.g. "chrome.exe".
     Prefer close_window when the program still responds.

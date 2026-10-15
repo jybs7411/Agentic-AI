@@ -10,14 +10,13 @@ from datetime import datetime
 from pathlib import Path
 
 from agent import config
-from agent.safety import is_protected
+from agent.safety import SAFE_OPEN_EXTS, is_private_file, is_protected, mark_private_data_read
+from agent.texts import say
 from agent.tooling import tool
 
 MAX_READ_CHARS = 8000
 SKIP_DIRS = {"appdata", "node_modules", "$recycle.bin", "__pycache__", ".git", "system volume information",
              "windows", "program files", "program files (x86)", "programdata", ".venv", "venv"}
-EXECUTABLE_EXTS = {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".msi", ".msp",
-                   ".reg", ".scr", ".com", ".hta", ".cpl", ".jar"}
 
 
 def _path(p: str) -> Path:
@@ -94,10 +93,8 @@ def drives() -> list:
     return [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
 
 
-@tool()
 def get_known_folders() -> dict:
-    """Get the real paths of the user's Desktop, Documents, Downloads, Pictures, Music, Videos,
-    home folder, and the list of drives."""
+    """The real paths of Desktop, Documents, Downloads... (shown to the AI in the system prompt)."""
     return {"folders": known_folders(), "drives": drives()}
 
 
@@ -153,9 +150,14 @@ def find_files(name_pattern: str = "", folder: str = "", extensions: str = "",
     if not root.is_dir():
         return {"error": f"Not a folder: {root}"}
     pattern = name_pattern.lower().strip()
-    use_wildcard = any(ch in pattern for ch in "*?[")
-    exts = {e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
-            for e in extensions.split(",") if e.strip()}
+    use_wildcard = any(ch in pattern for ch in "*?")
+    if use_wildcard:  # "[공지]" means the literal brackets, not a character class
+        pattern = pattern.replace("[", "[[]")
+    exts = set()
+    for e in extensions.split(","):
+        e = e.strip().lower().lstrip("*")
+        if e:
+            exts.add(e if e.startswith(".") else "." + e)
     since = time.time() - modified_within_days * 86400 if modified_within_days > 0 else None
     deadline = time.time() + 20
 
@@ -209,6 +211,11 @@ def find_files(name_pattern: str = "", folder: str = "", extensions: str = "",
 
 def _read_text(path: Path) -> str:
     raw = path.read_bytes()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or (len(raw) > 4 and raw[1:20:2].count(0) > 5):
+        try:
+            return raw.decode("utf-16")  # Notepad "Unicode" and PowerShell output
+        except UnicodeDecodeError:
+            pass
     for encoding in ("utf-8-sig", "cp949", "cp1252"):  # cp949 = Korean Windows encoding
         try:
             return raw.decode(encoding)
@@ -227,8 +234,11 @@ def read_file(path: str, max_chars: int = MAX_READ_CHARS) -> dict:
       max_chars: Maximum number of characters to return.
     """
     file = _path(path)
+    if is_private_file(file):
+        return {"error": "This file holds the agent's keys or private data and must not be read."}
     if not file.is_file():
         return {"error": f"File not found: {file}"}
+    mark_private_data_read()
     ext = file.suffix.lower()
     if ext == ".docx":
         import docx
@@ -287,10 +297,18 @@ def file_info(path: str) -> dict:
 
 def _risk_write_target(target: Path, overwrite: bool):
     if is_protected(target):
-        return f"Changes a protected system location: {target}"
+        return say(f"보호된 시스템 위치를 바꿔요: {target}", f"Changes a protected system location: {target}")
     if overwrite and target.exists():
-        return f"Replaces an existing item (old one goes to the Recycle Bin): {target}"
+        return say(f"이미 있는 파일을 바꿔요 (이전 파일은 휴지통으로): {target}",
+                   f"Replaces an existing item (old one goes to the Recycle Bin): {target}")
     return None
+
+
+def _same_item(a: Path, b: Path) -> bool:
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except OSError:
+        return False
 
 
 def _recycle_existing(target: Path):
@@ -298,7 +316,8 @@ def _recycle_existing(target: Path):
     send2trash(str(target))
 
 
-@tool(risk=lambda a: f"Creates a folder in a protected location: {a.get('path')}" if is_protected(a.get("path")) else None)
+@tool(risk=lambda a: say(f"보호된 위치에 폴더를 만들어요: {a.get('path')}", f"Creates a folder in a protected location: {a.get('path')}")
+      if is_protected(a.get("path")) else None)
 def create_folder(path: str) -> dict:
     """Create a new folder (and any missing parent folders).
 
@@ -323,11 +342,23 @@ def write_text_file(path: str, content: str, overwrite: bool = False) -> dict:
     p = _path(path)
     if p.exists() and not overwrite:
         return {"error": f"File already exists: {p}. Ask the user before setting overwrite=true."}
-    if p.exists():
-        _recycle_existing(p)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    _write_safely(p, lambda tmp: tmp.write_text(content, encoding="utf-8"))
     return {"written": str(p), "chars": len(content)}
+
+
+def _write_safely(target: Path, write):
+    """Write to a temporary file first; only if that worked, recycle the old file and put the new one
+    in its place. A failed write never destroys the old file."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".~{target.stem}.tmp{target.suffix}")
+    try:
+        write(tmp)
+        if target.exists():
+            _recycle_existing(target)
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 @tool(risk=lambda a: _risk_write_target(_target(_path(a.get("source", "")), _path(a.get("destination", ""))),
@@ -344,6 +375,8 @@ def copy_item(source: str, destination: str, overwrite: bool = False) -> dict:
     if not src.exists():
         return {"error": f"Does not exist: {src}"}
     target = _target(src, _path(destination))
+    if _same_item(src, target) or (src.is_dir() and str(target).startswith(str(src) + os.sep)):
+        return {"error": "Source and target are the same (or the target is inside the source)."}
     if target.exists():
         if not overwrite:
             return {"error": f"Target already exists: {target}"}
@@ -377,6 +410,13 @@ def _journal_add(moves: list):
 def _do_move(src: Path, target: Path, overwrite: bool) -> dict:
     if not src.exists():
         return {"error": f"Does not exist: {src}"}
+    if _same_item(src, target):
+        if str(src) != str(target) and src.name.lower() == target.name.lower():  # case-only rename
+            shutil.move(str(src), str(target))
+            return {"from": str(src), "to": str(target)}
+        return {"error": "Source and target are the same."}
+    if src.is_dir() and str(target).startswith(str(src) + os.sep):
+        return {"error": f"Can't move a folder into itself: {src}"}
     if target.exists():
         if not overwrite:
             return {"error": f"Target already exists: {target}"}
@@ -388,7 +428,7 @@ def _do_move(src: Path, target: Path, overwrite: bool) -> dict:
 
 def _risk_move(src: Path, target: Path, overwrite: bool):
     if is_protected(src):
-        return f"Moves something out of a protected system location: {src}"
+        return say(f"보호된 시스템 위치에서 옮겨요: {src}", f"Moves something out of a protected system location: {src}")
     return _risk_write_target(target, overwrite)
 
 
@@ -419,7 +459,7 @@ def _risk_move_many(args):
         if reason:
             return reason
     if len(sources) > 25:
-        return f"Moves {len(sources)} items at once into {dest}"
+        return say(f"{len(sources)}개 항목을 한꺼번에 옮겨요 → {dest}", f"Moves {len(sources)} items at once into {dest}")
     return None
 
 
@@ -436,11 +476,16 @@ def move_many(sources: list[str], destination_folder: str) -> dict:
     dest = _path(destination_folder)
     dest.mkdir(parents=True, exist_ok=True)
     moved, problems = [], []
-    for s in sources:
-        src = _path(s)
-        result = _do_move(src, dest / src.name, overwrite=False)
-        (moved if "to" in result else problems).append(result)
-    _journal_add(moved)
+    try:
+        for s in sources:
+            src = _path(s)
+            try:
+                result = _do_move(src, dest / src.name, overwrite=False)
+            except Exception as e:  # locked file, permission...: report it, keep going
+                result = {"error": f"{src}: {e}"}
+            (moved if "to" in result else problems).append(result)
+    finally:
+        _journal_add(moved)  # what was moved can always be undone
     return {"moved": len(moved), "problems": problems, "destination": str(dest)}
 
 
@@ -453,6 +498,9 @@ def rename_item(path: str, new_name: str) -> dict:
       new_name: The new name only (not a full path), including the extension for files.
     """
     src = _path(path)
+    new_name = new_name.strip().rstrip(".")
+    if not new_name:
+        return {"error": "The new name is empty."}
     if any(ch in new_name for ch in '\\/:*?"<>|'):
         return {"error": 'The new name cannot contain \\ / : * ? " < > |'}
     result = _do_move(src, src.with_name(new_name), overwrite=False)
@@ -461,8 +509,8 @@ def rename_item(path: str, new_name: str) -> dict:
     return result
 
 
-@tool(risk=lambda a: ("PROTECTED SYSTEM LOCATION - deletes: " if is_protected(a.get("path")) else
-                      "Deletes (moves to the Recycle Bin): ") + str(a.get("path")))
+@tool(risk=lambda a: (say("보호된 시스템 위치입니다! 삭제: ", "PROTECTED SYSTEM LOCATION - deletes: ") if is_protected(a.get("path"))
+                      else say("휴지통으로 옮겨요 (복원 가능): ", "Deletes (moves to the Recycle Bin): ")) + str(a.get("path")))
 def delete_item(path: str) -> dict:
     """Delete a file or folder by moving it to the Recycle Bin (it can be restored from there).
 
@@ -488,27 +536,35 @@ def undo_last_moves(operations: int = 1) -> dict:
     if not journal:
         return {"error": "Nothing to undo."}
     restored, problems = [], []
-    for _ in range(min(operations, len(journal))):
-        op = journal.pop()
-        for move in reversed(op["moves"]):
-            src, original = Path(move["to"]), Path(move["from"])
-            if not src.exists():
-                problems.append(f"No longer exists: {src}")
-            elif original.exists():
-                problems.append(f"Original place is taken: {original}")
-            else:
-                original.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(original))
-                restored.append(str(original))
-    config.UNDO_FILE.write_text(json.dumps(journal, ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        for _ in range(min(operations, len(journal))):
+            op = journal.pop()
+            for move in reversed(op["moves"]):
+                src, original = Path(move["to"]), Path(move["from"])
+                if not src.exists():
+                    problems.append(f"No longer exists: {src}")
+                elif original.exists():
+                    problems.append(f"Original place is taken: {original}")
+                elif is_protected(original) or is_protected(src):
+                    problems.append(f"Protected location, not restored: {original}")
+                else:
+                    try:
+                        original.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(src), str(original))
+                        restored.append(str(original))
+                    except Exception as e:
+                        problems.append(f"{src}: {e}")
+    finally:
+        config.UNDO_FILE.write_text(json.dumps(journal, ensure_ascii=False, indent=1), encoding="utf-8")
     return {"restored": restored, "problems": problems}
 
 
 def _risk_open(args):
     p = _path(args.get("path", ""))
-    if p.suffix.lower() in EXECUTABLE_EXTS:
-        return f"Runs a program or script file: {p}"
-    return None
+    if p.is_dir() or p.suffix.lower() in SAFE_OPEN_EXTS:
+        return None
+    return say(f"문서가 아닌 파일을 열어요. 프로그램이나 스크립트일 수 있어요: {p}",
+               f"Opens a file that is not a plain document; it may be a program or script: {p}")
 
 
 @tool(risk=_risk_open)
@@ -527,49 +583,83 @@ def open_path(path: str) -> dict:
 
 # ---------------------------------------------------------------- spreadsheets
 
+_ILLEGAL_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 def _cell(value):
-    """Numbers become real numbers in Excel; everything else stays text."""
-    text = str(value).strip() if value is not None else ""
-    if re.fullmatch(r"-?\d+(\.\d+)?", text) and not (len(text) > 1 and text.startswith("0") and "." not in text):
+    """Plain numbers become real numbers in Excel; everything else stays text. Text that Excel would
+    treat as a formula (=, +, -, @ at the start) is kept as text, so web data can't run formulas."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    text = _ILLEGAL_XML.sub("", str(value).strip()) if value is not None else ""
+    is_number = re.fullmatch(r"-?\d+(\.\d+)?", text)
+    if is_number and len(text.replace("-", "").replace(".", "")) <= 15 and not (
+            len(text) > 1 and text.lstrip("-").startswith("0") and "." not in text):
         return float(text) if "." in text else int(text)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
     return text
 
 
+def _normalize_rows(headers, rows):
+    """Accept the shapes models produce: list of lists, list of dicts, or a flat list of values."""
+    headers = list(headers or [])
+    fixed = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            if not headers:
+                headers = list(row.keys())
+            fixed.append([row.get(h, "") for h in headers])
+        elif isinstance(row, (list, tuple)):
+            fixed.append(list(row))
+        else:
+            fixed.append([row])
+    return headers, fixed
+
+
 def save_rows(path: str, headers: list, rows: list) -> dict:
-    """Write a table to .xlsx (Excel) or .csv. An existing file goes to the Recycle Bin first."""
+    """Write a table to .xlsx (Excel) or .csv. An existing file goes to the Recycle Bin only after the
+    new one was written successfully."""
     target = _path(path)
     if target.suffix.lower() not in (".xlsx", ".csv"):
-        target = target.with_suffix(".xlsx")
+        target = target.with_name(target.name + ".xlsx")
     if is_protected(target):
         return {"error": f"Protected location: {target}"}
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        _recycle_existing(target)
+    headers, rows = _normalize_rows(headers, rows)
     width = max([len(headers)] + [len(r) for r in rows]) if (headers or rows) else 0
     rows = [list(r) + [""] * (width - len(r)) for r in rows]
-    if target.suffix.lower() == ".csv":
+
+    def write_csv(tmp):
         import csv
-        with open(target, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig: Excel shows Korean correctly
+        with open(tmp, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig: Excel shows Korean correctly
             writer = csv.writer(f)
             if headers:
-                writer.writerow(headers)
-            writer.writerows(rows)
-    else:
+                writer.writerow([_cell(h) for h in headers])
+            writer.writerows([[_cell(v) for v in row] for row in rows])
+
+    def write_xlsx(tmp):
         from openpyxl import Workbook
         from openpyxl.styles import Font
         wb = Workbook()
         ws = wb.active
         if headers:
-            ws.append([str(h) for h in headers])
+            ws.append([str(_cell(h)) for h in headers])
             for c in ws[1]:
                 c.font = Font(bold=True)
             ws.freeze_panes = "A2"
         for row in rows:
             ws.append([_cell(v) for v in row])
+        for row in ws.iter_rows():
+            for c in row:
+                if isinstance(c.value, str) and c.value.startswith("'"):
+                    c.value = c.value[1:]
+                    c.data_type = "s"  # stored as text, never as a formula
         for column in ws.columns:
             longest = max((len(str(c.value)) for c in column if c.value is not None), default=8)
             ws.column_dimensions[column[0].column_letter].width = min(60, max(8, longest + 2))
-        wb.save(target)
+        wb.save(tmp)
+
+    _write_safely(target, write_csv if target.suffix.lower() == ".csv" else write_xlsx)
     return {"saved": str(target), "rows": len(rows), "columns": width}
 
 
