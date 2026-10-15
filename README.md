@@ -8,10 +8,11 @@ research, collecting data into Excel, filling forms, downloads, and watching pag
 It lives in the **system tray** (the small icons next to the clock). Hold a hotkey and speak, or type
 in the popup. It asks your permission before anything risky, and it can undo file moves.
 
-**Brains:** by default it thinks with a **local AI model in LM Studio** (free, private, no limits).
-When the local model is off or gets stuck, a **cheap cloud model** takes over (default: GLM-4.6V from
-Z.ai), with a **monthly budget cap**. Voice is transcribed by Gemini's free API: one small request
-per voice command.
+**Which AI thinks:** you choose. The **main AI** (default: **Gemini**, free tier) does the work.
+An optional **backup AI** takes over when the main one is unavailable. Pick both in the popup
+(the "AI:" box) or the tray menu. Choices: Gemini, a local model in LM Studio, GLM (Z.ai), Qwen,
+DeepSeek, or OpenRouter (one key for GPT, Claude and many more). Paid AIs have a **monthly budget cap**.
+Voice is transcribed by Gemini: one small request per voice command.
 
 | Stage | What | Status |
 |---|---|---|
@@ -36,7 +37,19 @@ needed. (Prefer Chrome? Set `"browser_channel": "chrome"` in `settings.json`.)
 **New install:** unzip the project to a simple folder such as `C:\Agent`, then double-click
 **`install.bat`**. When Notepad opens the `.env` file, paste your keys (see below), save, and close it.
 
-### 1a. Local brain: LM Studio (free)
+### 1a. Gemini (default main AI, free)
+
+Put `GEMINI_API_KEY=...` in `.env` (free at <https://aistudio.google.com/apikey>). The same key is
+used for voice recognition. That's all you need to start.
+
+**About the free limits:** each Gemini model has its own free daily and per-minute limits. When
+one model's limit is reached, the agent automatically switches to another Gemini Flash model, and
+goes back once the limit resets. Only when all of them are used up does the backup AI take over
+(or, without a backup, it tells you). Daily limits reset at midnight Pacific time (about 4-5 pm in
+Korea). With billing enabled on your Google account, the limits are much higher; then put the real
+prices in `settings.json` so the budget counts them.
+
+### 1b. Optional: a local model in LM Studio (free, private)
 
 1. Install **LM Studio** from <https://lmstudio.ai>.
 2. In LM Studio, search for **`qwen3-vl-8b`** and download it (pick a **Q4_K_M** version, about 5-6 GB).
@@ -52,21 +65,28 @@ needed. (Prefer Chrome? Set `"browser_channel": "chrome"` in `settings.json`.)
    `Model '...' is not in that list`, copy the exact name into `settings.json` under
    `brains > lmstudio > model`.
 
-LM Studio must be running with the model loaded while you use the agent. If it isn't, the agent
-uses the cloud brain instead and tells you.
+LM Studio must be running with the model loaded whenever you pick it as main or backup AI.
+Small local models are noticeably less capable than Gemini at multi-step tasks. As a main AI they
+hand a task to the backup AI when they get stuck (3 failed actions in a row or 12 steps).
 
-### 1b. Cloud backup brain: Z.ai GLM (cheap)
+### 1c. Optional: other AIs (backup or main)
+
+**Z.ai GLM (cheap, good backup):**
 
 1. Create an account at <https://z.ai>, open **API Keys**, create a key.
 2. Put it in `.env` as `ZAI_API_KEY=...`
 3. Add a small amount of credit in your Z.ai account. The default model `glm-4.6v` costs about
    $0.30 per million input tokens and $0.90 per million output tokens (Z.ai price page, Oct 2026).
-   `glm-4.6v-flash` is listed as free: set `"cloud_brain": "glm-flash"` to try it.
+   `glm-4.6v-flash` is listed as free: choose "GLM-4.6V-Flash (Z.ai, free)" to try it.
 
-### 1c. Voice: Gemini (free)
+**OpenRouter (one key, many AIs: GPT, Claude, Gemini, Qwen...):** create a key at
+<https://openrouter.ai>, put `OPENROUTER_API_KEY=...` in `.env`, and choose "OpenRouter". The default
+model `openrouter/auto` lets OpenRouter pick; to use a specific model, copy its name from
+openrouter.ai/models into `settings.json` (`brains > openrouter > model`) together with its price.
 
-Keep `GEMINI_API_KEY=...` in `.env` (free at <https://aistudio.google.com/apikey>). It is only used
-to turn your voice into text, once per voice command. Without it, typing still works.
+**Qwen (Alibaba Cloud)** and **DeepSeek** work the same way (`DASHSCOPE_API_KEY`, `DEEPSEEK_API_KEY`).
+
+A key added to `.env` while the agent runs is picked up on the next command.
 
 Run **`check_setup.bat`** after any change. `[FAIL]` lines tell you what to fix.
 
@@ -84,7 +104,8 @@ Double-click **`start.bat`**. A round purple icon appears in the tray and the po
 | **Hold `Ctrl + Alt + Space`**, speak, release | Voice command (Korean keyboard: use the **left** Alt) |
 | `Ctrl + Alt + A` or click the tray icon | Open the popup to type |
 | **`Esc`** | Stop the agent immediately |
-| Right-click the tray icon | **Brain** (auto / local only / cloud only), this month's cloud cost, new conversation, settings, memory, action log, quit |
+| "AI:" box at the top of the popup | Choose the main AI |
+| Right-click the tray icon | **Main AI**, **Backup AI**, this month's paid-AI cost, new conversation, settings, memory, action log, quit |
 
 Tray icon color: **purple** = ready, **red** = listening, **yellow** = working.
 
@@ -175,20 +196,24 @@ clicks and typing.
 online shop can still confirm an order. Watch the first runs in new apps, and remember **Esc**.
 Every action is written to `data\actions.log`.
 
-## 5. Brains and costs
+## 5. AIs and costs
 
-| Brain (settings name) | Cost (per 1M tokens, input / output) | Sees screenshots | Notes |
+| AI (settings name) | Cost (per 1M tokens, input / output) | Sees screenshots | Notes |
 |---|---|---|---|
-| `lmstudio` (default local) | free | yes (Qwen3-VL) | private: nothing leaves your PC |
-| `glm` (default cloud) | ~$0.30 / $0.90 | yes | Z.ai official price page |
+| `gemini` (default main) | free tier | yes | switches between Flash models when a limit is reached |
+| `lmstudio` | free | yes (Qwen3-VL) | private: nothing leaves your PC; less capable |
+| `glm` | ~$0.30 / $0.90 | yes | Z.ai official price page; good cheap backup |
 | `glm-flash` | listed as free | yes | rate limits likely |
 | `qwen` | ~$0.20 / $1.60 (unverified) | yes | Alibaba Cloud (international) |
 | `deepseek` | ~$0.30 / $1.20 (unverified) | no | uses the element list instead of pictures |
-| `gemini` | free tier | yes | the free limits that ran out in Stage 1 |
+| `openrouter` | depends on the model | depends | one key for many AIs; set the model's price |
 
-- **Auto mode** (default): the local brain works first. The cloud takes over when LM Studio is off,
-  or when the local model is stuck (3 failed actions in a row, or 12 steps without finishing; both
-  adjustable). Choose *Local only* in the tray if you never want to pay.
+- **Main + backup:** the main AI does everything. The backup takes over only when the main one is
+  unavailable: limits used up, no key, server off, or budget reached. A *local* main AI also hands
+  over when it gets stuck.
+- **Suggested setups:** Gemini + GLM backup (free most of the time, a few cents when Gemini's
+  limits run out). Gemini + no backup (always free; it stops when the limits run out). LM Studio
+  only (fully private).
 - **Budget:** paid cloud use stops when `cloud_monthly_budget_usd` (default **$6**, about 8,000 KRW) is
   reached. The tray menu shows this month's spending. Details are in `data\usage.json`.
 - **Rough cost:** one cloud step sends about 6,000-10,000 tokens (instructions, tools, conversation,
@@ -196,9 +221,10 @@ Every action is written to `data\actions.log`.
   This is an estimate; your real numbers appear in the tray.
 - **Prices in `settings.json` are estimates** used for the budget. Correct them if your
   provider's page says otherwise.
-- **Privacy:** with a cloud brain, your commands, file contents the agent reads, and screenshots go
-  to that company's servers. Z.ai (Zhipu), Alibaba and DeepSeek are Chinese companies. If that
-  matters for a task, switch the tray to **Local only** first.
+- **Privacy:** with any cloud AI, your commands, file contents and web pages the agent reads, and
+  screenshots go to that company's servers. On Gemini's free tier Google may use them to improve its
+  products. Z.ai (Zhipu), Alibaba and DeepSeek are Chinese companies. For a private task, choose the
+  local LM Studio model as main AI (and no backup) first.
 
 ## 6. Settings
 
@@ -206,10 +232,9 @@ Tray > **Edit settings** opens `settings.json`. Save it, then restart the agent 
 
 | Setting | What it does |
 |---|---|
-| `brain_mode` | `"auto"`, `"local"` or `"cloud"` (also in the tray menu) |
-| `local_brain`, `cloud_brain` | Which entries of `brains` to use |
-| `brains` | Each brain's address, model name, price, and whether it can see images |
-| `escalate_after_steps`, `escalate_after_errors` | When auto mode hands a task to the cloud |
+| `main_brain`, `backup_brain` | Which entries of `brains` to use (also in the popup and tray menu); `""` = no backup |
+| `brains` | Each AI's address, model name, price, whether it can see images, and (Gemini) `auto_switch_models` |
+| `escalate_after_steps`, `escalate_after_errors` | When a *local* main AI hands a task to the backup |
 | `cloud_monthly_budget_usd` | Monthly spending cap for paid brains |
 | `voice_model` | Gemini model for voice recognition |
 | `risky_click_words`, `messaging_apps` | Words and apps that make clicks / Enter ask first |
@@ -236,7 +261,9 @@ Paths in `settings.json` use `\\` for each `\`.
 | Local model is slow | Make sure GPU Offload is at maximum; close games/other GPU apps; try a smaller Context Length |
 | Local model clicks the wrong thing | Name the button in your command; or switch to Cloud for that task |
 | It clicked inside its own popup / typed in the wrong window | Click the app you want first so it's in front, then give the command |
-| "this month's cloud budget is used up" | Raise `cloud_monthly_budget_usd`, or use Local only |
+| "this month's cloud budget is used up" | Raise `cloud_monthly_budget_usd`, or choose a free AI |
+| "Gemini: usage limit reached" | All free Gemini models are used up for now. Choose a backup AI in the tray, or wait for the reset |
+| "... needs an API key" after choosing an AI | Put that key in `.env`; it's used from the next command |
 | Hotkey doesn't work | It doesn't work while an *administrator* window (e.g. Task Manager) is in front |
 | Can't control an app at all | Apps running as administrator can't be controlled by a normal program |
 | "Gemini's free voice limit is used up" | Type instead; it resets daily (about 4-5 pm in Korea) |
@@ -271,7 +298,7 @@ When asking Claude for help, send the error text and the last lines of `data\age
 |---|---|
 | `agent/app.py` | Starts everything, the worker thread, tray brain menu |
 | `agent/agent.py` | The agent loop, system prompt, local -> cloud hand-off |
-| `agent/brains.py` | OpenAI-compatible brains: retries, budget, image fallback |
+| `agent/brains.py` | OpenAI-compatible AIs: main/backup, Gemini model switching, retries, budget, image fallback |
 | `agent/usage.py` | Monthly token and cost tracking |
 | `agent/transcriber.py` | Voice -> text with Gemini |
 | `agent/tooling.py` | The `@tool` system (docstring + type hints -> tool description) |

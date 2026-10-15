@@ -25,14 +25,14 @@ def check_brain(brain, role: str):
     from agent.brains import BrainError
     from agent.safety import StopSwitch
     if brain.missing_key:
-        report(WARN if role == "cloud" else FAIL, f"{role} brain {brain.label}: no API key",
+        report(WARN if role == "backup" else FAIL, f"{role} AI {brain.label}: no API key",
                f"Put {brain.missing_key}=your-key in the .env file")
         return
     try:
         names = brain.list_models()
         listed = ", ".join(names[:8]) + (" ..." if len(names) > 8 else "")
         report(OK, f"{role} brain {brain.label} reachable. Models: {listed}")
-        if names and brain.model not in names:
+        if names and brain.model not in names and not brain.auto_switch:
             report(WARN, f"Model '{brain.model}' is not in that list",
                    "Copy the exact name from the list into settings.json (brains > "
                    f"{brain.name} > model)")
@@ -78,8 +78,7 @@ def main():
     from agent import config
     try:
         settings = config.load_settings()
-        report(OK, f"settings.json (brain mode: {settings['brain_mode']}, local: {settings['local_brain']}, "
-                   f"cloud: {settings['cloud_brain']})")
+        report(OK, f"settings.json (main AI: {settings['main_brain']}, backup AI: {settings['backup_brain'] or 'none'})")
     except ValueError as e:
         report(FAIL, str(e))
         return
@@ -87,10 +86,14 @@ def main():
     from agent.brains import BrainRouter
     from agent.usage import Usage
     router = BrainRouter(settings, Usage())
-    if settings["brain_mode"] in ("auto", "local"):
-        check_brain(router.brains[settings["local_brain"]], "local")
-    if settings["brain_mode"] in ("auto", "cloud"):
-        check_brain(router.brains[settings["cloud_brain"]], "cloud")
+    main = router.brains.get(settings["main_brain"])
+    if main is None:
+        report(FAIL, f"main_brain '{settings['main_brain']}' is not in brains", "Pick one in the tray menu")
+    else:
+        check_brain(main, "main")
+    backup = router.brains.get(settings["backup_brain"] or "")
+    if backup is not None and backup is not main:
+        check_brain(backup, "backup")
     report(OK, f"Cloud spending this month: ${Usage().month_cost():.2f} of "
                f"${float(settings['cloud_monthly_budget_usd']):.2f} budget")
 

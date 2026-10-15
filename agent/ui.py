@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, ttk
 
 FONT = ("Malgun Gothic", 10)  # Windows font with Korean support
 FONT_BOLD = ("Malgun Gothic", 10, "bold")
@@ -22,8 +22,10 @@ COLORS = {
 
 
 class Popup:
-    def __init__(self, stop, on_send, on_mic, on_stop):
+    def __init__(self, stop, on_send, on_mic, on_stop, brains=(), current_brain="", on_brain_change=None):
         self.stop = stop
+        self.brains = list(brains)  # [(name, label)]
+        self.on_brain_change = on_brain_change or (lambda name: None)
         self.on_send = on_send
         self.on_mic = on_mic
         self.on_stop = on_stop
@@ -46,6 +48,16 @@ class Popup:
         self.status_label.pack(side="left", fill="x", expand=True)
         tk.Button(header, text="Stop (Esc)", command=self.on_stop, relief="flat", bg="#ffffff",
                   fg=COLORS["accent"], font=FONT_SMALL, padx=8).pack(side="right", padx=8, pady=4)
+
+        # --- which AI thinks (main AI); the backup AI is chosen in the tray menu
+        brain_row = tk.Frame(root, bg=COLORS["bg"])
+        brain_row.pack(fill="x", padx=8, pady=(6, 0))
+        tk.Label(brain_row, text="AI:", bg=COLORS["bg"], fg=COLORS["muted"], font=FONT_SMALL).pack(side="left")
+        self.brain_var = tk.StringVar(value=self._label_of(current_brain))
+        self.brain_box = ttk.Combobox(brain_row, textvariable=self.brain_var, state="readonly", font=FONT_SMALL,
+                                      values=[label for _, label in self.brains], width=34)
+        self.brain_box.pack(side="left", padx=(4, 0))
+        self.brain_box.bind("<<ComboboxSelected>>", self._brain_selected)
 
         # --- conversation log
         self.log = scrolledtext.ScrolledText(root, wrap="word", font=FONT, bg=COLORS["panel"],
@@ -98,6 +110,19 @@ class Popup:
 
     def status(self, text: str):
         self.call(self.status_label.config, {"text": text})
+
+    def set_brain(self, name: str):
+        self.call(self.brain_var.set, self._label_of(name))
+
+    def _label_of(self, name: str) -> str:
+        return next((label for n, label in self.brains if n == name), name)
+
+    def _brain_selected(self, _event=None):
+        label = self.brain_var.get()
+        name = next((n for n, lab in self.brains if lab == label), None)
+        if name:
+            self.on_brain_change(name)
+        self.entry.focus_set()
 
     def set_mic_active(self, active: bool):
         self.call(self.mic_button.config, {"text": "Done" if active else "Mic",
@@ -239,25 +264,25 @@ def _icon_image(color: str):
 
 class Tray:
     def __init__(self, on_open, on_new_conversation, on_settings, on_memory, on_log, on_quit,
-                 get_mode, set_mode, cost_text):
+                 brains, get_main, set_main, get_backup, set_backup, cost_text):
         import pystray
         self.normal_image = _icon_image(COLORS["accent"])
         self.listening_image = _icon_image("#c62828")
         self.busy_image = _icon_image("#e0a100")
 
-        def mode_item(text, mode):
-            return pystray.MenuItem(text, lambda: set_mode(mode), checked=lambda item: get_mode() == mode,
-                                    radio=True)
+        def choice(label, name, get, set_):
+            return pystray.MenuItem(label, lambda: set_(name), checked=lambda item: get() == name, radio=True)
+
+        main_items = [choice(label, name, get_main, set_main) for name, label in brains]
+        backup_items = [choice("None", "", get_backup, set_backup)] + [
+            choice(label, name, get_backup, set_backup) for name, label in brains]
 
         menu = pystray.Menu(
             pystray.MenuItem("Open", lambda: on_open(), default=True),
             pystray.MenuItem("New conversation", lambda: on_new_conversation()),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Brain", pystray.Menu(
-                mode_item("Auto: local first, cloud as backup", "auto"),
-                mode_item("Local only (free, private)", "local"),
-                mode_item("Cloud only", "cloud"),
-            )),
+            pystray.MenuItem("Main AI", pystray.Menu(*main_items)),
+            pystray.MenuItem("Backup AI", pystray.Menu(*backup_items)),
             pystray.MenuItem(lambda item: cost_text(), lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Edit settings", lambda: on_settings()),

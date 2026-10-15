@@ -75,18 +75,32 @@ DEFAULT_BRAINS = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "api_key_env": "GEMINI_API_KEY",
         "model": "gemini-flash-latest",
+        # Each Gemini model has its own free limit: when one runs out, use the next Flash model.
+        "auto_switch_models": True,
+        "model_filter": "flash",
         "vision": True,
-        "price_input": 0, "price_output": 0,
+        "price_input": 0, "price_output": 0,  # free tier; put real prices here if you enable billing
+        "timeout": 120,
+    },
+    "openrouter": {
+        "label": "OpenRouter (any model)",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "model": "openrouter/auto",  # or e.g. a specific model name from openrouter.ai/models
+        "vision": True,
+        "price_input": 3.0, "price_output": 15.0,  # depends on the model; set it to your model's price
         "timeout": 120,
     },
 }
 
 DEFAULT_SETTINGS = {
-    # Which brains to use. "auto" = local first, cloud when local is off or gets stuck.
-    "brain_mode": "auto",            # "auto", "local" or "cloud"
-    "local_brain": "lmstudio",
-    "cloud_brain": "glm",
-    # In auto mode: hand the task to the cloud after this many steps or this many failed actions in a row.
+    # Which AI thinks for the agent (a name from "brains" below). Also selectable in the tray menu
+    # and the popup. The backup takes over when the main AI is unavailable (limit used up, no key,
+    # server off). "" = no backup.
+    "main_brain": "gemini",
+    "backup_brain": "",
+    # Only when the main AI is a LOCAL model: hand the task to the backup after this many steps or
+    # this many failed actions in a row (small local models get stuck more often).
     "escalate_after_steps": 12,
     "escalate_after_errors": 3,
     # Stop using paid cloud brains when this month's estimated cost reaches this (US dollars).
@@ -166,6 +180,8 @@ def load_settings() -> dict:
         if "model" in raw and "voice_model" not in raw:
             raw["voice_model"] = raw["model"]
         raw.pop("model", None)
+        for old_key in ("brain_mode", "local_brain", "cloud_brain"):  # Stage 2 brain settings
+            raw.pop(old_key, None)
         user_brains = raw.pop("brains", {})
         settings.update(raw)
         for name, profile in user_brains.items():
@@ -205,6 +221,12 @@ def get_key(env_name: str) -> str:
         return ""
     load_env()
     key = os.environ.get(env_name, "").strip()
+    if not key or key.startswith("paste-your"):  # .env may have changed since it was first loaded
+        try:
+            from dotenv import dotenv_values
+            key = (dotenv_values(ENV_FILE).get(env_name) or "").strip()
+        except Exception:
+            pass
     return "" if key.startswith("paste-your") else key
 
 

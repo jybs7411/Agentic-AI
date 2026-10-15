@@ -167,6 +167,7 @@ class FakeBrain:
         self.unavailable = unavailable
         self.missing_key = ""
         self.is_paid = False
+        self.is_local = False
 
     def budget_ok(self):
         return True
@@ -273,6 +274,7 @@ def test_falls_back_to_cloud_when_local_is_off(tmp_path):
 def test_escalates_to_cloud_after_repeated_errors(tmp_path):
     bad = call("read_file", path=str(tmp_path / "missing.txt"))
     local = FakeBrain([("", [bad]), ("", [bad]), ("", [bad]), ("never used", [])], label="local")
+    local.is_local = True
     cloud = FakeBrain([("Fixed it.", [])], label="cloud")
     ui = FakeUI()
     make_agent(FakeRouter(local, cloud), ui, tmp_path, escalate_after_errors=3).handle("read it")
@@ -405,3 +407,49 @@ def test_spreadsheet_numbers_and_leading_zeros(tmp_path):
     TOOLS["save_spreadsheet"].call({"path": str(tmp_path / "s.xlsx"), "headers": ["a", "b", "c"],
                                     "rows": [["가", "007", "12.5"]]})
     assert [c.value for c in load_workbook(tmp_path / "s.xlsx").active[2]] == ["가", "007", 12.5]
+
+
+def test_smart_main_ai_is_not_replaced_when_a_tool_fails(tmp_path):
+    bad = call("read_file", path=str(tmp_path / "missing.txt"))
+    main = FakeBrain([("", [bad]), ("", [bad]), ("", [bad]), ("That file doesn't exist.", [])], label="gemini")
+    backup = FakeBrain([], label="backup")
+    ui = FakeUI()
+    make_agent(FakeRouter(main, backup), ui, tmp_path).handle("read it")
+    assert ui.spoken == ["That file doesn't exist."] and backup.sent == []
+
+
+def test_router_uses_main_then_backup():
+    from agent.brains import BrainRouter
+    settings = json.loads(json.dumps(config.DEFAULT_SETTINGS))
+    router = BrainRouter(settings)
+    assert [b.name for b in router.chain()] == ["gemini"]
+    settings["backup_brain"] = "glm"
+    assert [b.name for b in router.chain()] == ["gemini", "glm"]
+    settings["main_brain"], settings["backup_brain"] = "lmstudio", "lmstudio"
+    assert [b.name for b in router.chain()] == ["lmstudio"]
+
+
+def test_stage2_brain_settings_are_migrated():
+    config.SETTINGS_FILE.write_text(json.dumps({"brain_mode": "auto", "local_brain": "lmstudio",
+                                                "cloud_brain": "glm"}), encoding="utf-8")
+    settings = config.load_settings()
+    assert settings["main_brain"] == "gemini" and "brain_mode" not in settings
+    assert settings["brains"]["gemini"]["auto_switch_models"] is True
+
+
+def test_model_ranking_prefers_stable_newer_full_models():
+    from agent.brains import rank_models
+    names = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.6-flash-lite", "gemini-3.8-flash-preview",
+             "gemini-3.6-flash-image", "gemini-3.6-pro", "gemini-flash-latest"]
+    assert rank_models(names, "flash")[:3] == ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+    assert "gemini-3.6-flash-image" not in rank_models(names, "flash")
+
+
+def test_placeholder_signatures_replace_foreign_ones():
+    from agent.brains import with_placeholder_signatures
+    msgs = [{"role": "assistant", "content": None, "tool_calls": [
+        {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{}"},
+         "extra_content": {"google": {"thought_signature": "OLD"}}}]}]
+    out = with_placeholder_signatures(msgs)
+    assert out[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "skip_thought_signature_validator"
+    assert msgs[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "OLD"

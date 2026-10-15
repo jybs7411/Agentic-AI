@@ -37,7 +37,10 @@ class App:
         self.jobs = queue.Queue()
         self.working = False
 
-        self.popup = Popup(self.stop, on_send=self.submit_text, on_mic=self.toggle_mic, on_stop=self.press_stop)
+        brain_choices = [(name, profile.get("label", name)) for name, profile in settings["brains"].items()]
+        self.popup = Popup(self.stop, on_send=self.submit_text, on_mic=self.toggle_mic, on_stop=self.press_stop,
+                           brains=brain_choices, current_brain=settings["main_brain"],
+                           on_brain_change=self.set_main_brain)
         notice = lambda text: self.popup.show("info", text)  # noqa: E731
         self.speaker = Speaker(rate=settings["speech_rate"], on_notice=notice)
         self.recorder = Recorder()
@@ -57,8 +60,11 @@ class App:
             on_memory=lambda: _open_file(config.MEMORY_FILE, default="[]"),
             on_log=lambda: _open_file(config.ACTION_LOG_FILE),
             on_quit=self.quit,
-            get_mode=lambda: self.settings["brain_mode"],
-            set_mode=self.set_brain_mode,
+            brains=brain_choices,
+            get_main=lambda: self.settings["main_brain"],
+            set_main=self.set_main_brain,
+            get_backup=lambda: self.settings.get("backup_brain") or "",
+            set_backup=self.set_backup_brain,
             cost_text=self.cost_text,
         )
         self.hotkeys = Hotkeys(settings, on_talk_start=self.start_listening, on_talk_end=self.finish_listening,
@@ -68,7 +74,7 @@ class App:
 
         talk = settings["push_to_talk_hotkey"].upper()
         self.popup.show("info", f"Ready. Hold {talk} and speak, or type below. "
-                                f"Press {settings['stop_key'].upper()} to stop me. Brain: {self.mode_text()}")
+                                f"Press {settings['stop_key'].upper()} to stop me. AI: {self.mode_text()}")
         self.popup.show_window(focus=True)
 
     # ---------------------------------------------------- what the Agent calls (its "ui")
@@ -206,21 +212,29 @@ class App:
 
     # ---------------------------------------------------- brains and costs
 
-    def set_brain_mode(self, mode: str):
-        self.settings["brain_mode"] = mode
+    def set_main_brain(self, name: str):
+        self._set_brain("main_brain", name)
+        self.popup.set_brain(name)
+
+    def set_backup_brain(self, name: str):
+        self._set_brain("backup_brain", name)
+
+    def _set_brain(self, key: str, name: str):
+        self.settings[key] = name
         config.save_settings(self.settings)
-        self.popup.show("info", f"Brain: {self.mode_text()}")
+        brain = self.router.brains.get(name)
+        self.popup.show("info", f"AI: {self.mode_text()}")
+        if brain is not None and brain.missing_key:
+            self.popup.show("error", f"{brain.label} needs an API key: put {brain.missing_key}=... in the .env "
+                                     "file, then restart the agent.")
+        self.tray.set_state("normal")  # refresh the tray menu
 
     def mode_text(self) -> str:
         brains = self.router.brains
-        local = brains.get(self.settings["local_brain"])
-        cloud = brains.get(self.settings["cloud_brain"])
-        mode = self.settings["brain_mode"]
-        if mode == "local":
-            return local.label if local else "?"
-        if mode == "cloud":
-            return cloud.label if cloud else "?"
-        return f"auto ({local.label if local else '?'} -> {cloud.label if cloud else '?'})"
+        main = brains.get(self.settings["main_brain"])
+        backup = brains.get(self.settings.get("backup_brain") or "")
+        text = main.label if main else "?"
+        return text + (f", backup: {backup.label}" if backup and backup is not main else ", no backup")
 
     def cost_text(self) -> str:
         spent = self.usage.month_cost()
@@ -323,7 +337,7 @@ def main():
         _message_box(str(e))
         sys.exit(1)
     safety.set_extra_protected(settings["extra_protected_folders"])
-    log.info("Starting; brain mode %s", settings["brain_mode"])
+    log.info("Starting; main AI %s, backup %s", settings["main_brain"], settings.get("backup_brain"))
     try:
         app = App(settings)
     except Exception as e:

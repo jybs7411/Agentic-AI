@@ -11,8 +11,8 @@
         v
     final short answer (shown + spoken)
 
-Brains: in "auto" mode the local model works first. The task is handed to the cloud model when
-the local one is off, or gets stuck (too many steps or several failed actions in a row).
+Brains: your main AI does the work. The backup AI takes over when the main one is unavailable
+(limit used up, no key, server off), or, if the main AI is a local model, when it gets stuck.
 """
 
 import getpass
@@ -172,8 +172,9 @@ class Agent:
                     *({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}} for b64 in images),
                 ]})
 
-            stuck = (errors_in_a_row >= self.settings["escalate_after_errors"]
-                     or steps_here >= self.settings["escalate_after_steps"])
+            # A small local model that keeps failing hands the task to the backup AI.
+            stuck = brain.is_local and (errors_in_a_row >= self.settings["escalate_after_errors"]
+                                        or steps_here >= self.settings["escalate_after_steps"])
             if stuck and index + 1 < len(chain) and _ready(chain[index + 1]):
                 index += 1
                 brain = chain[index]
