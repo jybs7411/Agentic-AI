@@ -135,6 +135,22 @@ DEFAULT_SETTINGS = {
         "submit", "제출", "post", "게시", "publish", "install", "설치", "uninstall", "format", "포맷",
         "transfer", "송금", "이체", "sign out", "로그아웃", "탈퇴", "unsubscribe",
     ],
+    # Web (Stage 3): the agent's own browser. "msedge" (built into Windows) or "chrome".
+    "browser_channel": "msedge",
+    "browser_executable": "",       # optional: full path to a Chromium-based browser instead
+    "browser_visible": True,
+    "web_search_engine": "google",  # "google", "naver", "duckduckgo" or "bing"
+    "web_page_chars": 4000,         # how much page text the AI reads at a time
+    # Spoken when a watched page (watch_page) has something new.
+    "watch_announcement": "지켜보던 페이지에 새 내용이 있어요.",
+    # The agent refuses to open or read these sites (banking, payments). Add your own.
+    "web_blocked_sites": [
+        "kbstar.com", "shinhan.com", "wooribank.com", "kebhana.com", "hanabank.com", "nonghyup.com",
+        "ibk.co.kr", "kakaobank.com", "toss.im", "tossbank.com", "standardchartered.co.kr", "citibank.co.kr",
+        "busanbank.co.kr", "knbank.co.kr", "dgb.co.kr", "kfcc.co.kr", "epostbank.go.kr", "suhyup-bank.com",
+        "sparkasse.de", "deutsche-bank.de", "commerzbank.de", "ing.de", "dkb.de", "n26.com", "comdirect.de",
+        "postbank.de", "paypal.com",
+    ],
     # In these programs, pressing Enter usually sends a message, so it asks you first.
     "messaging_apps": ["kakaotalk", "slack", "discord", "teams", "telegram", "whatsapp", "line",
                        "outlook", "thunderbird", "signal", "wechat", "messenger"],

@@ -25,3 +25,7 @@ uiautomation>=2.0.20
 send2trash>=1.8
 pypdf>=4.0
 python-docx>=1.1
+
+# Web (Stage 3): browser control and Excel files
+playwright>=1.48
+openpyxl>=3.1

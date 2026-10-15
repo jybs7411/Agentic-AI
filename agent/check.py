@@ -66,7 +66,8 @@ def main():
                             ("pystray", "pystray"), ("PIL", "pillow"), ("psutil", "psutil"),
                             ("win32gui", "pywin32"), ("mss", "mss"), ("uiautomation", "uiautomation"),
                             ("send2trash", "send2trash"), ("pypdf", "pypdf"), ("docx", "python-docx"),
-                            ("pyperclip", "pyperclip"), ("screen_brightness_control", "screen-brightness-control")]:
+                            ("pyperclip", "pyperclip"), ("screen_brightness_control", "screen-brightness-control"),
+                            ("playwright", "playwright"), ("openpyxl", "openpyxl")]:
         try:
             __import__(module)
         except Exception as e:
@@ -125,6 +126,19 @@ def main():
         report(OK, f"Screen reading works. Front window: {target['title'] if target else '(none)'}")
     except Exception as e:
         report(FAIL, f"Screen control check failed: {e}")
+
+    try:
+        import tempfile
+        from agent.tools import web
+        web.PROFILE_DIR = tempfile.mkdtemp(prefix="agent-check-")
+        web.configure(dict(settings, browser_visible=False))
+        web._page().set_content("<p>ok</p>")
+        report(OK, f"Agent browser works ({settings['browser_channel'] or 'custom'})")
+        web.shutdown()
+    except Exception as e:
+        report(FAIL, f"Agent browser could not start: {str(e)[:250]}",
+               'Set "browser_channel" to "chrome" or "msedge" in settings.json, or run: '
+               ".venv\\Scripts\\python -m playwright install chromium  and set browser_channel to \"\"")
 
     try:
         from agent.voice import list_voices

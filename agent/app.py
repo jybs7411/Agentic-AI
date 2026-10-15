@@ -26,7 +26,7 @@ class App:
         from agent.brains import BrainRouter
         from agent.hotkeys import Hotkeys
         from agent.tooling import load_all_tools
-        from agent.tools import screen
+        from agent.tools import screen, web
         from agent.transcriber import Transcriber
         from agent.ui import Popup, Tray
         from agent.usage import Usage
@@ -46,7 +46,9 @@ class App:
         self.router = BrainRouter(settings, self.usage, on_status=self.popup.status, on_notice=notice)
         self.agent = Agent(settings, self.router, load_all_tools(), get_memory(), ui=self, stop=self.stop)
         screen.configure(settings, hide_popup=self.popup.hide_and_wait)
+        web.configure(settings, ask_user=self._ask_user)
         self._screen = screen
+        self._web = web
 
         self.tray = Tray(
             on_open=lambda: self.popup.show_window(focus=True),
@@ -62,6 +64,7 @@ class App:
         self.hotkeys = Hotkeys(settings, on_talk_start=self.start_listening, on_talk_end=self.finish_listening,
                                on_open_popup=lambda: self.popup.show_window(focus=True), on_stop=self.press_stop)
         threading.Thread(target=self._worker, daemon=True, name="agent-worker").start()
+        threading.Thread(target=self._watch_timer, daemon=True, name="watch-timer").start()
 
         talk = settings["push_to_talk_hotkey"].upper()
         self.popup.show("info", f"Ready. Hold {talk} and speak, or type below. "
@@ -82,22 +85,37 @@ class App:
     def speak(self, text):
         self.speaker.speak(text)
 
+    def _ask_user(self, message: str) -> bool:
+        """The web tools hand over to you (login, password, CAPTCHA, payment) and wait."""
+        self.speaker.speak(message)
+        return self.popup.confirm(message, "When you are finished in the browser, click Done.",
+                                  title="Your turn", yes_text="Done", no_text="Cancel")
+
     # ---------------------------------------------------- commands
 
     def submit_text(self, text: str):
         self._queue_job(text=text)
 
     def _queue_job(self, text=None, audio=None):
-        if self.working or not self.jobs.empty():
+        if self.working:
             self.popup.show("info", "Still working on the last command. Press Esc to stop it first.")
             return
         self.speaker.stop()
         self.working = True
-        self.jobs.put((text, audio))
+        self.jobs.put(("command", text, audio))
 
     def _worker(self):
+        """Runs every job one after another. The browser and screen reading live on this thread."""
         while True:
-            text, audio = self.jobs.get()
+            kind, *payload = self.jobs.get()
+            if kind == "quit":
+                self._web.shutdown()
+                payload[0].set()
+                return
+            if kind == "watch":
+                self._run_watch(payload[0])
+                continue
+            text, audio = payload
             self.tray.set_state("busy")
             try:
                 if audio is not None:
@@ -112,6 +130,30 @@ class App:
                 self.tray.set_state("normal")
                 self.popup.status("Ready")
                 self.popup.show_window(focus=False)  # comes back after screen actions hid it
+
+    def _watch_timer(self):
+        """Once a minute, queue checks for watched pages that are due (only while idle)."""
+        while True:
+            threading.Event().wait(60)
+            if self.working or not self.jobs.empty():
+                continue
+            try:
+                for watch_id in self._web.due_watches():
+                    self.jobs.put(("watch", watch_id))
+            except Exception:
+                log.exception("Watch timer failed")
+
+    def _run_watch(self, watch_id: int):
+        try:
+            message = self._web.check_watch(watch_id)
+        except Exception as e:
+            log.exception("Watch check failed")
+            message = None
+            self.popup.show("error", f"Page watch failed: {e}")
+        if message:
+            self.popup.show("info", f"[Watch] {message}")
+            self.popup.show_window(focus=False)
+            self.speaker.speak(self.settings.get("watch_announcement", "New content on a watched page."))
 
     def _transcribe(self, audio: bytes) -> str:
         from agent.brains import BrainError
@@ -201,6 +243,9 @@ class App:
     def quit(self):
         self.stop.press()
         self.speaker.stop()
+        closed = threading.Event()
+        self.jobs.put(("quit", closed))  # close the browser cleanly on the worker thread
+        closed.wait(5)
         self.hotkeys.remove()
         self.tray.stop()
         self.popup.call(self.popup.root.destroy)

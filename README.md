@@ -1,8 +1,9 @@
 # Desktop Agent
 
 An AI agent for Windows that understands what you **say or type** (Korean, English, German, or a mix)
-and does it on your computer: files, apps, settings, and (since Stage 2) **clicking and typing
-inside any app** by looking at the screen.
+and does it on your computer: files, apps, settings, **clicking and typing inside any app** by
+looking at the screen (Stage 2), and **working on websites in its own browser** (Stage 3):
+research, collecting data into Excel, filling forms, downloads, and watching pages for changes.
 
 It lives in the **system tray** (the small icons next to the clock). Hold a hotkey and speak, or type
 in the popup. It asks your permission before anything risky, and it can undo file moves.
@@ -15,9 +16,9 @@ per voice command.
 | Stage | What | Status |
 |---|---|---|
 | 1 | Voice/text commands, files and folders, apps and windows, system controls, memory, spoken replies | done |
-| 2 | Screen control (see, click, type in any app), local brain + cloud backup, cost tracking | **this version** |
-| 3 | Web automation | next |
-| 4 | Writing into apps, repeatable workflows | later |
+| 2 | Screen control (see, click, type in any app), local brain + cloud backup, cost tracking | done |
+| 3 | Web: own browser, research, data to Excel, forms, downloads, page watching | **this version** |
+| 4 | Writing into apps, repeatable workflows | next |
 
 ---
 
@@ -25,9 +26,12 @@ per voice command.
 
 You need **Windows 10/11** and **Python 3.10+**.
 
-**Updating from Stage 1?** Copy the new files over the old folder (your `.env`, `settings.json` and
-`data` folder are kept), then run **`install.bat`** again to add the new libraries. Your settings
-are upgraded automatically.
+**Updating from an earlier stage?** Quit the agent, copy the new files over the old folder (your
+`.env`, `settings.json` and `data` folder are kept), then run **`install.bat`** again to add the new
+libraries. Your settings are upgraded automatically.
+
+The web tools use **Microsoft Edge**, which is built into Windows, so no extra browser download is
+needed. (Prefer Chrome? Set `"browser_channel": "chrome"` in `settings.json`.)
 
 **New install:** unzip the project to a simple folder such as `C:\Agent`, then double-click
 **`install.bat`**. When Notepad opens the `.env` file, paste your keys (see below), save, and close it.
@@ -38,7 +42,10 @@ are upgraded automatically.
 2. In LM Studio, search for **`qwen3-vl-8b`** and download it (pick a **Q4_K_M** version, about 5-6 GB).
    It can read screenshots and use tools, and fits an 8-12 GB graphics card.
 3. Go to the **Developer** tab, select the model to load, and before loading set:
-   - **Context Length: 16384** (with a 12 GB card you can try 32768)
+   - **Context Length: 16384** at least. For web research **32768** works much better (the
+     agent's instructions and tools alone take about 7,500 tokens). With an 8 GB card, turn on
+     Flash Attention and K/V cache quantization (Q8) in the load settings, if your LM Studio
+     version offers them, to make the larger context fit.
    - **GPU Offload: maximum**
 4. Load the model and switch the server **on** (it runs at `http://localhost:1234`).
 5. Run **`check_setup.bat`**. It lists the model names LM Studio reports. If the line says
@@ -96,6 +103,26 @@ Inside apps (Stage 2):
 - `탐색기에서 문서 폴더 열고 정렬을 날짜순으로 바꿔줘`
 - `Click the Save button` / `저장 버튼 눌러줘`
 
+On the web (Stage 3):
+
+- `요즘 전기차 배터리 화재 원인에 대해 검색해서 3군데 이상 읽고 요약해줘`
+- `다나와랑 쿠팡에서 갤럭시 버즈 가격 찾아서 엑셀로 정리해줘`
+- `이 페이지 표를 엑셀로 저장해줘`
+- `정부24 전입신고 양식 열어서 내 정보로 채워줘` (it stops before submitting)
+- `이 사이트 공지사항 페이지에 새 글 올라오면 알려줘` (checks every hour)
+- `Lade den Monatsbericht von dieser Seite herunter`
+
+### How web control works
+
+The agent has **its own browser window** (a separate Edge profile, stored in `data\browser-profile`).
+It is separate from your normal browser and its logins. To let the agent use a site that needs
+a login, log in **once in that window** when the agent asks; it stays logged in.
+
+Instead of screenshots, the agent reads each page as short text with a number on every link,
+button and field, e.g. `[12] link "뉴스"`. The main content comes first, menus and footer last.
+It then says "click 12" or "type into 3". That's fast, cheap, and works well even with the local
+model. When the layout matters, it can also take a screenshot of the page (`web_look`).
+
 ### How screen control works
 
 1. The agent hides its popup and looks at the **front window**.
@@ -127,11 +154,22 @@ clicks and typing.
 - **pressing Enter in messaging apps** (KakaoTalk, Slack, Discord, Teams, Outlook...): that usually *sends*
 - `Alt+F4`, `Shift+Delete`
 
+**On the web it also:**
+
+- **never types passwords or card numbers, never solves CAPTCHAs, never logs in or pays.** At
+  that point it shows the browser and a **"Your turn"** box. Do your part in the browser, then
+  click **Done**.
+- asks before **submitting a form** (search boxes excepted), before clicking buy / order / send /
+  delete-like buttons, and before downloading programs (`.exe`, `.msi`...)
+- refuses to open **banking and payment sites** (`web_blocked_sites` in settings: major Korean and
+  German banks, Toss, KakaoBank, PayPal; add your own)
+
 **Privacy guards:**
 
 - Screenshots are never taken while a window from `screenshot_blocklist` (password managers,
   banking) is visible, and the agent refuses to read such a window at all.
-- The agent treats text on screen, in files and in web pages as *data*, never as orders.
+- The agent treats text on screen, in files and in web pages as *data*, never as orders. This
+  matters most on the web, where anyone can write "ignore your instructions and..." on a page.
 
 **Honest limits:** the agent can't know what *every* click does. A button named "OK" in an
 online shop can still confirm an order. Watch the first runs in new apps, and remember **Esc**.
@@ -180,6 +218,11 @@ Tray > **Edit settings** opens `settings.json`. Save it, then restart the agent 
 | `always_confirm_tools`, `never_confirm_tools` | Make any tool always / never ask |
 | `push_to_talk_hotkey`, `open_popup_hotkey`, `stop_key` | Shortcuts |
 | `speak_replies`, `speech_rate` | Spoken replies |
+| `browser_channel`, `browser_executable`, `browser_visible` | Which browser the agent uses, and whether you see it |
+| `web_search_engine` | `"google"`, `"naver"`, `"duckduckgo"` or `"bing"` |
+| `web_page_chars` | How much page text the AI reads at a time (lower = less memory for the local model) |
+| `web_blocked_sites` | Sites the agent must never open |
+| `watch_announcement` | What it says when a watched page changes |
 
 Paths in `settings.json` use `\\` for each `\`.
 
@@ -197,6 +240,10 @@ Paths in `settings.json` use `\\` for each `\`.
 | Hotkey doesn't work | It doesn't work while an *administrator* window (e.g. Task Manager) is in front |
 | Can't control an app at all | Apps running as administrator can't be controlled by a normal program |
 | "Gemini's free voice limit is used up" | Type instead; it resets daily (about 4-5 pm in Korea) |
+| "Could not start a browser" | Set `browser_channel` to `"chrome"` (or `"msedge"`). If neither is installed: `.venv\Scripts\python -m playwright install chromium`, then set `browser_channel` to `""` |
+| The site shows a robot check / CAPTCHA | The agent asks you to solve it in its browser window, then continues |
+| Web research hands over to the cloud a lot | The local model's context is full: use Context Length 32768 in LM Studio, or lower `web_page_chars` |
+| Watched page alerts never come | Watches only run while the agent is running; check `list_watches` ("지켜보는 페이지 보여줘") |
 
 When asking Claude for help, send the error text and the last lines of `data\agent.log`.
 
@@ -231,6 +278,7 @@ When asking Claude for help, send the error text and the last lines of `data\age
 | `agent/safety.py` | Protected folders, action log, stop switch |
 | `agent/tools/files.py`, `apps.py`, `system.py`, `memory_tools.py` | Stage 1 actions |
 | `agent/tools/screen.py` | Stage 2: look at the screen, click, type, keys, scroll |
+| `agent/tools/web.py` | Stage 3: the agent's browser, page reading, forms, tables, downloads, page watching |
 | `agent/voice.py`, `agent/ui.py`, `agent/memory.py`, `agent/check.py` | Microphone and speech, popup and tray, memory, setup check |
 
 **Adding a new ability** = one Python function with `@tool(...)`, type hints and a clear docstring
@@ -243,4 +291,5 @@ in `agent/tools/`. Every brain sees it automatically.
 .venv\Scripts\python -m pytest tests
 ```
 
-The tests simulate the AI, so they need no LM Studio, API key or microphone.
+The tests simulate the AI, so they need no LM Studio, API key or microphone. `tests/test_web.py`
+drives a hidden browser against a small built-in test website (it is skipped if no browser starts).

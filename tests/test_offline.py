@@ -389,3 +389,19 @@ def test_language_detection_for_voices():
 
 def test_clean_for_speech_drops_paths_and_markdown():
     assert clean_for_speech("**Done.** Saved to C:\\Users\\me\\a.txt") == "Done. Saved to"
+
+
+def test_old_long_tool_results_are_shortened():
+    from agent.agent import _shorten_old_results
+    turn = [{"role": "user", "content": "q"}] + [{"role": "tool", "tool_call_id": str(i), "content": "x" * 5000}
+                                                for i in range(5)]
+    out = _shorten_old_results(turn)
+    assert [len(m["content"]) < 2000 for m in out[1:]] == [True, True, False, False, False]
+    assert turn[1]["content"] == "x" * 5000  # original untouched
+
+
+def test_spreadsheet_numbers_and_leading_zeros(tmp_path):
+    from openpyxl import load_workbook
+    TOOLS["save_spreadsheet"].call({"path": str(tmp_path / "s.xlsx"), "headers": ["a", "b", "c"],
+                                    "rows": [["가", "007", "12.5"]]})
+    assert [c.value for c in load_workbook(tmp_path / "s.xlsx").active[2]] == ["가", "007", 12.5]

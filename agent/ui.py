@@ -60,8 +60,9 @@ class Popup:
         # --- confirmation box (hidden until needed)
         self.confirm_frame = tk.Frame(root, bg=COLORS["confirm"], padx=10, pady=8,
                                       highlightbackground="#e0b84d", highlightthickness=1)
-        tk.Label(self.confirm_frame, text="Allow this action?", bg=COLORS["confirm"], font=FONT_BOLD,
-                 anchor="w").pack(fill="x")
+        self.confirm_title = tk.Label(self.confirm_frame, text="Allow this action?", bg=COLORS["confirm"],
+                                      font=FONT_BOLD, anchor="w")
+        self.confirm_title.pack(fill="x")
         self.confirm_text = tk.Label(self.confirm_frame, text="", bg=COLORS["confirm"], font=FONT_SMALL,
                                      justify="left", anchor="w", wraplength=WIDTH - 50)
         self.confirm_text.pack(fill="x", pady=(2, 6))
@@ -69,8 +70,9 @@ class Popup:
         buttons.pack(fill="x")
         self.no_button = tk.Button(buttons, text="No", width=10, command=lambda: self._answer(False))
         self.no_button.pack(side="right", padx=4)
-        tk.Button(buttons, text="Yes, do it", width=10, bg="#2e7d32", fg="white",
-                  command=lambda: self._answer(True)).pack(side="right", padx=4)
+        self.yes_button = tk.Button(buttons, text="Yes, do it", width=10, bg="#2e7d32", fg="white",
+                                    command=lambda: self._answer(True))
+        self.yes_button.pack(side="right", padx=4)
 
         # --- input row
         self.input_row = tk.Frame(root, bg=COLORS["bg"])
@@ -102,11 +104,12 @@ class Popup:
                                            "bg": "#c62828" if active else "SystemButtonFace",
                                            "fg": "white" if active else "black"})
 
-    def confirm(self, reason: str, described: str) -> bool:
+    def confirm(self, reason: str, described: str, title: str = "Allow this action?",
+                yes_text: str = "Yes, do it", no_text: str = "No") -> bool:
         """Ask Yes/No and wait for the answer (called from the agent thread)."""
         self._confirm_event.clear()
         self._confirm_result = False
-        self.call(self._show_confirm, reason, described)
+        self.call(self._show_confirm, reason, described, title, yes_text, no_text)
         while not self._confirm_event.wait(0.2):
             if self.stop.pressed:
                 self.call(self._hide_confirm)
@@ -154,8 +157,11 @@ class Popup:
         self.log.config(state="disabled")
         self.log.see("end")
 
-    def _show_confirm(self, reason: str, described: str):
-        self.confirm_text.config(text=f"{reason}\n\n{described}")
+    def _show_confirm(self, reason: str, described: str, title: str, yes_text: str, no_text: str):
+        self.confirm_title.config(text=title)
+        self.yes_button.config(text=yes_text)
+        self.no_button.config(text=no_text)
+        self.confirm_text.config(text=f"{reason}\n\n{described}" if described else reason)
         self.confirm_frame.pack(fill="x", padx=8, pady=4, before=self.input_row)
         self._show_window(focus=True)
         self.no_button.focus_set()  # Enter/Space on the default button means "No": the safe choice

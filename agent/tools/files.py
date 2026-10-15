@@ -3,6 +3,7 @@
 import fnmatch
 import json
 import os
+import re
 import shutil
 import time
 from datetime import datetime
@@ -522,3 +523,63 @@ def open_path(path: str) -> dict:
         return {"error": f"Does not exist: {p}"}
     os.startfile(str(p))  # Windows only
     return {"opened": str(p)}
+
+
+# ---------------------------------------------------------------- spreadsheets
+
+def _cell(value):
+    """Numbers become real numbers in Excel; everything else stays text."""
+    text = str(value).strip() if value is not None else ""
+    if re.fullmatch(r"-?\d+(\.\d+)?", text) and not (len(text) > 1 and text.startswith("0") and "." not in text):
+        return float(text) if "." in text else int(text)
+    return text
+
+
+def save_rows(path: str, headers: list, rows: list) -> dict:
+    """Write a table to .xlsx (Excel) or .csv. An existing file goes to the Recycle Bin first."""
+    target = _path(path)
+    if target.suffix.lower() not in (".xlsx", ".csv"):
+        target = target.with_suffix(".xlsx")
+    if is_protected(target):
+        return {"error": f"Protected location: {target}"}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        _recycle_existing(target)
+    width = max([len(headers)] + [len(r) for r in rows]) if (headers or rows) else 0
+    rows = [list(r) + [""] * (width - len(r)) for r in rows]
+    if target.suffix.lower() == ".csv":
+        import csv
+        with open(target, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig: Excel shows Korean correctly
+            writer = csv.writer(f)
+            if headers:
+                writer.writerow(headers)
+            writer.writerows(rows)
+    else:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+        wb = Workbook()
+        ws = wb.active
+        if headers:
+            ws.append([str(h) for h in headers])
+            for c in ws[1]:
+                c.font = Font(bold=True)
+            ws.freeze_panes = "A2"
+        for row in rows:
+            ws.append([_cell(v) for v in row])
+        for column in ws.columns:
+            longest = max((len(str(c.value)) for c in column if c.value is not None), default=8)
+            ws.column_dimensions[column[0].column_letter].width = min(60, max(8, longest + 2))
+        wb.save(target)
+    return {"saved": str(target), "rows": len(rows), "columns": width}
+
+
+@tool(risk=lambda a: _risk_write_target(_path(a.get("path", "")), True))
+def save_spreadsheet(path: str, headers: list[str], rows: list[list[str]]) -> dict:
+    """Save data you collected (e.g. from several web pages) as an Excel (.xlsx) or CSV file.
+
+    Args:
+      path: Where to save, e.g. "C:\\Users\\me\\Documents\\prices.xlsx". Use .xlsx unless the user wants CSV.
+      headers: Column titles, e.g. ["Shop", "Product", "Price", "Link"].
+      rows: The data rows, each a list of cell values in the same order as headers.
+    """
+    return save_rows(path, headers, rows)

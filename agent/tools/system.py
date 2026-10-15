@@ -130,7 +130,8 @@ def open_settings_page(page: str) -> dict:
 
 @tool()
 def open_url(url: str) -> dict:
-    """Open a web address in the default browser.
+    """Open a web address in the user's normal browser for the USER to look at. To read or act on a
+    page yourself, use web_open instead.
 
     Args:
       url: The full address, starting with http:// or https://
@@ -143,7 +144,8 @@ def open_url(url: str) -> dict:
 
 @tool()
 def search_web(query: str, site: str = "google") -> dict:
-    """Open a web search in the default browser.
+    """Open a web search in the user's normal browser for the USER to look at. To read the results
+    yourself, use web_search instead.
 
     Args:
       query: What to search for.

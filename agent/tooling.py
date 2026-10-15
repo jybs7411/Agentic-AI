@@ -133,6 +133,6 @@ def _parse_docstring(doc: str):
 
 def load_all_tools() -> dict:
     """Import every tool module so their @tool functions get registered."""
-    from agent.tools import apps, files, memory_tools, screen, system  # noqa: F401
+    from agent.tools import apps, files, memory_tools, screen, system, web  # noqa: F401
 
     return REGISTRY
