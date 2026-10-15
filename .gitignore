@@ -1,0 +1,10 @@
+# Secrets and personal data: never commit these
+.env
+settings.json
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

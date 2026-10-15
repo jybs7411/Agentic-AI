@@ -1,0 +1,21 @@
+# Gemini (Google's official SDK)
+google-genai>=2.31,<3
+python-dotenv>=1.0
+
+# Hotkeys, microphone, tray icon
+keyboard>=0.13.5
+sounddevice>=0.4.6
+numpy>=1.26
+pystray>=0.19.5
+pillow>=10.0
+
+# Windows control
+pywin32>=306
+psutil>=5.9
+pyperclip>=1.8
+screen-brightness-control>=0.20
+
+# Files: safe delete (Recycle Bin), PDF and Word reading
+send2trash>=1.8
+pypdf>=4.0
+python-docx>=1.1
